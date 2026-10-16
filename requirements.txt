@@ -1,0 +1,2 @@
+# Python side of the Deal Room Agent (everything else is the standard library).
+playwright==1.56.0

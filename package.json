@@ -1,0 +1,15 @@
+{
+  "name": "deal-room-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Builds Hippo Video deal rooms from a hotel's website: scrape, brand, merge fields, review, load, verify.",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "cli": "node src/cli.js",
+    "test": "python3 test/test_stages.py && node --test --test-concurrency=1 test/e2e.test.js",
+    "test:loader": "python3 test/test_loader.py"
+  },
+  "dependencies": {}
+}

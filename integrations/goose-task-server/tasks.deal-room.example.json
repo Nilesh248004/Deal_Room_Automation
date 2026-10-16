@@ -1,0 +1,43 @@
+{
+  "_note": "Example entries for goose-task-server's tasks.json. Field names follow the plan in claude/deal-room-agent-plan.md; rename them to match your tasks.json schema. Both start the agent with an argument list (no shell).",
+  "tasks": [
+    {
+      "id": "deal-room-build",
+      "type": "command",
+      "description": "Build a Hippo deal room from a hotel website (stops for review by default)",
+      "cwd": "/opt/deal-room-agent",
+      "command": ["node", "src/cli.js", "run", "--url", "{{hotel_url}}", "--page", "{{hippo_page_id}}", "--flow", "{{flow}}", "--mode", "{{mode}}"],
+      "timeout_ms": 900000,
+      "max_concurrent": 2,
+      "success_exit_codes": [0, 10],
+      "params": [
+        {"key": "hotel_url", "required": true, "pattern": "^https://[^\\s\"']{4,2000}$"},
+        {"key": "hippo_page_id", "required": true, "pattern": "^[0-9]{1,12}$"},
+        {"key": "flow", "required": false, "default": "email", "pattern": "^(email|cvent)$"},
+        {"key": "mode", "required": false, "default": "review", "pattern": "^(review|auto)$"}
+      ]
+    },
+    {
+      "id": "deal-room-approve",
+      "type": "command",
+      "description": "Approve a deal room job (loads it into Hippo when the job was started with load=api)",
+      "cwd": "/opt/deal-room-agent",
+      "command": ["node", "src/cli.js", "approve", "{{job_id}}"],
+      "timeout_ms": 300000,
+      "params": [{"key": "job_id", "required": true, "pattern": "^dr_[a-z0-9]+_[a-f0-9]{8}$"}]
+    },
+    {
+      "id": "deal-room-goose",
+      "type": "recipe",
+      "description": "Same build, started through goose (for chat / ad-hoc requests)",
+      "recipe": "/opt/deal-room-agent/recipes/deal_room.yaml",
+      "timeout_ms": 900000,
+      "params": [
+        {"key": "hotel_url", "required": true, "pattern": "^https://[^\\s\"']{4,2000}$"},
+        {"key": "hippo_page_id", "required": false, "pattern": "^[0-9]{0,12}$"},
+        {"key": "flow", "required": false, "default": "email", "pattern": "^(email|cvent)$"},
+        {"key": "mode", "required": false, "default": "review", "pattern": "^(review|auto)$"}
+      ]
+    }
+  ]
+}

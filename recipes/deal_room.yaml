@@ -1,0 +1,40 @@
+# goose recipe: lets goose (and goose-task-server) start a deal room build.
+# goose only runs the fixed command below; it does NOT write copy, colours or merge fields itself.
+# Everything that ends up in Hippo comes from the deterministic pipeline (agent/stages.py).
+version: 1.0.0
+title: Build a Hippo deal room from a hotel website
+description: Scrape the hotel's official site, build an Email or Cvent deal room with the right merge fields, and stop for review (or load it into Hippo).
+parameters:
+  - key: hotel_url
+    input_type: string
+    requirement: required
+    description: The hotel's official page (for example the hotel page on tajhotels.com or ihg.com). Not booking.com or other travel sites.
+  - key: hippo_page_id
+    input_type: string
+    requirement: optional
+    default: ""
+    description: Digits from https://www.hippovideo.io/deal-room/edit/<id>. Needed when load is api.
+  - key: flow
+    input_type: string
+    requirement: optional
+    default: email
+    description: email or cvent
+  - key: mode
+    input_type: string
+    requirement: optional
+    default: review
+    description: review (stop for approval) or auto (continue only if there are no high-severity warnings)
+extensions:
+  - type: builtin
+    name: developer
+instructions: |
+  You start a Deal Room Agent job and report the result. Rules:
+  - Run exactly one command from the deal-room-agent folder:
+      node src/cli.js run --url "{{ hotel_url }}" --page "{{ hippo_page_id }}" --flow "{{ flow }}" --mode "{{ mode }}"
+    Leave out --page when hippo_page_id is empty.
+  - Do not edit any file the command produces (template.json, loader.js, copy.json, config.json). Do not write deal room copy yourself.
+  - Do not pass --approve and do not run the approve, overrides or rollback commands unless the person explicitly asks for that job id.
+  - When it finishes, report: the job id, the final status, any "Check before approving" items, and the paths of review.html and loader.js.
+  - Exit code 10 means "waiting for approval" and is not an error.
+prompt: |
+  Build a {{ flow }} deal room for {{ hotel_url }} (Hippo page "{{ hippo_page_id }}", mode {{ mode }}) and report the result.

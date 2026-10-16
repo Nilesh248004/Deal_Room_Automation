@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^node --test --test-concurrency=1 test/e2e\\.test\\.js$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Grand Azure Resort Lisbon | Official Site</title>
+<meta name="description" content="Oceanfront luxury resort in Lisbon with 214 rooms and 3,200 sqm of event space.">
+<meta property="og:image" content="/img/hero-exterior-1920.jpg"><meta name="theme-color" content="#0A3D62">
+<link rel="icon" href="/img/logo-azure.png"><link rel="stylesheet" href="/style.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Hotel","name":"Grand Azure Resort Lisbon","telephone":"+351 21 000 0000",
+"address":{"@type":"PostalAddress","streetAddress":"Avenida Marginal 100","addressLocality":"Lisbon","postalCode":"1000-001","addressCountry":"PT"},
+"geo":{"@type":"GeoCoordinates","latitude":38.70,"longitude":-9.30},"numberOfRooms":214,"checkinTime":"15:00","checkoutTime":"12:00",
+"amenityFeature":[{"@type":"LocationFeatureSpecification","name":"Rooftop pool"},{"@type":"LocationFeatureSpecification","name":"Spa"}]}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+{"@type":"Question","name":"How far is Grand Azure Resort Lisbon from the airport?","acceptedAnswer":{"@type":"Answer","text":"Yes, the resort is 18 km from Lisbon Airport, about 25 minutes by car. Airport transfers can be arranged on request."}},
+{"@type":"Question","name":"Is parking available at the resort?","acceptedAnswer":{"@type":"Answer","text":"Valet parking is available for all guests, with EV charging in the garage."}},
+{"@type":"Question","name":"What places can I visit near the resort?","acceptedAnswer":{"@type":"Answer","text":"Belem Tower and the Jeronimos Monastery are a short drive away, and the Cascais promenade is 10 minutes along the coast."}}]}</script>
+</head><body>
+<header><a href="/"><img class="site-logo" src="/img/logo-azure.png" alt="Grand Azure Resort logo" height="45"></a>
+<nav><a href="/hotels/grand-azure/meetings/">Meetings &amp; Events</a> <a href="/hotels/grand-azure/dining/">Dining</a> <a href="#rooms">Rooms</a></nav></header>
+<div class="hero"><div><h1>Grand Azure Resort Lisbon</h1><a class="btn" href="#book">Book now</a></div></div>
+<section id="rooms"><h2>Rooms &amp; Suites</h2><p>214 rooms and suites with Atlantic views, 18 km from Lisbon Airport.</p><p>Check-in from 3:00 pm and check-out until 12:00 pm.</p>
+<img src="/img/guest-room-king-400.jpg" srcset="/img/guest-room-king-400.jpg 400w, /img/guest-room-king-1600.jpg 1600w" alt="King guest room"></section>
+<section class="sand"><h2>Gallery</h2><div class="gallery">
+<img class="lazy" data-src="/img/rooftop-pool-1600.jpg" alt="Rooftop pool">
+<img class="lazy" data-src="/img/spa-1600.jpg" alt="Azure Spa">
+<img class="lazy" data-src="/img/lobby-1600.jpg" alt="Lobby lounge"></div>
+<img src="/img/badge-tripadvisor-120.png" alt="Travellers choice badge"></section>
+<footer><svg aria-label="Grand Azure logo" width="160" height="40" viewBox="0 0 160 40"><rect width="160" height="40" fill="#C8A165"/><text x="10" y="26" fill="#0A3D62">GRAND AZURE</text></svg>
+<p>Avenida Marginal 100, Lisbon · +351 21 000 0000</p></footer>
+<div id="cookie" style="position:fixed;inset:auto 0 0 0;background:#111;color:#fff;padding:24px;z-index:99"><p>We use cookies to improve your experience.</p><button onclick="document.getElementById('cookie').remove()">Accept all</button></div>
+<script>
+const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.src = e.target.dataset.src; io.unobserve(e.target); } }));
+document.querySelectorAll("img.lazy").forEach(i => io.observe(i));
+</script></body></html>

@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deal Room Agent</title>
+<style>
+  :root { --bg:#f5f5f2; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e3e3de; --ok:#1f7a3f; --bad:#b42318; --warn:#9a6700; --run:#175cd3; --accent:#1d1d1b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#151514; --card:#1f1f1d; --ink:#ececea; --muted:#a3a39d; --line:#33332f; --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --run:#60a5fa; --accent:#ececea; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; flex:1; }
+  main { display:grid; grid-template-columns: 380px 1fr; gap:16px; padding:16px 24px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding:16px; } header { padding:16px; } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; min-width:0; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font:inherit; }
+  textarea { font:12px/1.4 ui-monospace, Menlo, monospace; min-height:140px; }
+  .row { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; }
+  button { padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  .btns { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:8px 4px; border-top:1px solid var(--line); vertical-align:top; cursor:pointer; overflow-wrap:anywhere; }
+  tr.sel td { background:var(--bg); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:99px; font-size:12px; border:1px solid currentColor; white-space:nowrap; }
+  .s-succeeded,.s-ok { color:var(--ok); } .s-failed,.s-cancelled { color:var(--bad); } .s-awaiting_approval { color:var(--warn); }
+  .s-running,.s-queued { color:var(--run); } .s-pending,.s-skipped,.s-rolled_back { color:var(--muted); }
+  .stages { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
+  pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; max-height:420px; overflow:auto; font:12px/1.45 ui-monospace, Menlo, monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .muted { color:var(--muted); font-size:12px; }
+  .err { color:var(--bad); }
+  ul.hi { color:var(--bad); margin:6px 0; padding-left:18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Deal Room Agent</h1>
+  <input id="key" type="password" placeholder="API key" style="max-width:260px" autocomplete="off">
+  <button id="saveKey">Use key</button>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>New deal room</h2>
+      <label for="url">Hotel's official website (hotel page, not booking.com)</label>
+      <input id="url" placeholder="https://www.example-hotels.com/hotels/grand-azure/">
+      <label for="page">Hippo deal room page ID (from /deal-room/edit/&lt;id&gt;)</label>
+      <input id="page" inputmode="numeric" placeholder="1605252">
+      <div class="row">
+        <div><label for="flow">Flow</label><select id="flow"><option value="email">Email</option><option value="cvent">Cvent</option></select></div>
+        <div><label for="mode">Mode</label><select id="mode"><option value="review">Review</option><option value="auto">Auto</option></select></div>
+        <div><label for="load">Load</label><select id="load"><option value="manual">File</option><option value="api">API</option></select></div>
+      </div>
+      <label for="scrape">Optional: scrape file from the browser scraper (for sites that block servers)</label>
+      <input id="scrape" type="file" accept=".json,application/json">
+      <div class="btns"><button class="primary" id="go">Build deal room</button></div>
+      <p id="msg" class="muted"></p>
+    </section>
+    <section>
+      <h2>Recent</h2>
+      <table id="jobs"></table>
+    </section>
+  </div>
+  <div>
+    <section id="detail"><p class="muted">Pick a job on the left, or start a new one.</p></section>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let KEY = ""; try { KEY = sessionStorage.getItem("dra-key") || ""; } catch (e) {}
+$("key").value = KEY;
+$("saveKey").onclick = () => { KEY = $("key").value.trim(); try { sessionStorage.setItem("dra-key", KEY); } catch (e) {} refresh(); };
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, { ...opts, headers: { "x-api-key": KEY, ...(opts.body ? { "content-type": "application/json" } : {}), ...(opts.headers || {}) } });
+  if (!r.ok) { let e = r.statusText; try { const j = await r.json(); e = j.error + (j.details ? ": " + j.details.join("; ") : ""); } catch (x) {} throw new Error(e); }
+  return r;
+};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let current = null, logFrom = 0, logText = "";
+
+$("go").onclick = async () => {
+  $("msg").textContent = ""; $("msg").className = "muted";
+  const body = { hotel_url: $("url").value.trim(), flow: $("flow").value, mode: $("mode").value, load: $("load").value };
+  if ($("page").value.trim()) body.hippo_page_id = $("page").value.trim();
+  try {
+    const f = $("scrape").files[0]; if (f) body.scrape = JSON.parse(await f.text());
+    const j = await (await api("/deal-rooms", { method: "POST", body: JSON.stringify(body) })).json();
+    $("msg").textContent = "Started " + j.id; select(j.id); refresh();
+  } catch (e) { $("msg").textContent = e.message; $("msg").className = "err"; }
+};
+
+async function refresh() {
+  if (!KEY) return;
+  try {
+    const { jobs } = await (await api("/deal-rooms?limit=30")).json();
+    $("jobs").innerHTML = jobs.map(j => `<tr data-id="${esc(j.id)}" class="${j.id === current ? "sel" : ""}"><td><b>${esc(j.hotel || new URL(j.hotel_url).hostname)}</b><br><span class="muted">${esc(j.flow)} · ${new Date(j.created_at).toLocaleString()}</span></td><td><span class="pill s-${esc(j.status)}">${esc(j.status.replace("_", " "))}</span></td></tr>`).join("") || '<tr><td class="muted">No jobs yet.</td></tr>';
+    document.querySelectorAll("#jobs tr[data-id]").forEach(tr => tr.onclick = () => select(tr.dataset.id));
+  } catch (e) { $("jobs").innerHTML = `<tr><td class="err">${esc(e.message)}</td></tr>`; }
+}
+
+function select(id) { if (id !== current) { current = id; logFrom = 0; logText = ""; } show(); }
+
+async function show() {
+  if (!current) return;
+  let j; try { j = await (await api("/deal-rooms/" + current)).json(); } catch (e) { $("detail").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  try { const r = await api(`/deal-rooms/${current}/logs?from=${logFrom}`); const t = await r.text(); logText += t; logFrom = +r.headers.get("x-log-size") || logFrom; } catch (e) {}
+  let arts = []; try { arts = (await (await api(`/deal-rooms/${current}/artifacts`)).json()).artifacts; } catch (e) {}
+  let rv = null; if (arts.includes("review.json")) try { rv = await (await api(`/deal-rooms/${current}/artifacts/review.json`)).json(); } catch (e) {}
+  const st = Object.entries(j.stages).map(([k, v]) => `<span class="pill s-${esc(v.status)}" title="${esc(v.note || "")}">${esc(k)}</span>`).join("");
+  const busy = ["queued", "running"].includes(j.status);
+  $("detail").innerHTML = `
+    <h2>${esc(j.hotel || j.input.hotel_url)} <span class="pill s-${esc(j.status)}">${esc(j.status.replace("_", " "))}</span></h2>
+    <div class="muted">${esc(j.id)} · ${esc(j.input.flow)} flow · ${esc(j.input.mode)} · load ${esc(j.input.load)}${j.input.hippo_page_id ? " · page " + esc(j.input.hippo_page_id) : ""} · by ${esc(j.created_by)}</div>
+    <div class="stages">${st}</div>
+    ${j.error ? `<p class="err">${esc(j.error)}${j.rolled_back ? " (page was rolled back to its backup)" : ""}</p>` : ""}
+    ${rv && rv.high_severity && rv.high_severity.length ? `<b class="err">Check before approving:</b><ul class="hi">${rv.high_severity.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+    <div class="btns">
+      <button id="bReview" ${arts.includes("review.html") ? "" : "disabled"}>Open review page</button>
+      <button id="bLoader" ${arts.includes("loader.js") ? "" : "disabled"}>Download loader.js</button>
+      <button id="bTpl" ${arts.includes("template.json") ? "" : "disabled"}>template.json</button>
+      <button id="bShot" ${arts.includes("page.png") ? "" : "disabled"}>Site screenshot</button>
+    </div>
+    <div class="btns">
+      <button class="primary" id="bApprove" ${j.status === "awaiting_approval" ? "" : "disabled"}>Approve${j.input.load === "api" ? " and load into Hippo" : ""}</button>
+      <button id="bRollback" ${arts.includes("backup.json") && !busy ? "" : "disabled"}>Roll back page</button>
+      <button id="bCancel" ${busy || j.status === "awaiting_approval" ? "" : "disabled"}>Cancel</button>
+    </div>
+    <label for="ov">Edit copy, photos or facts (JSON merged into the config, then rebuilt). Example: {"overview": "…", "slots": {"gallery": ["exterior_1", "rooms_1"]}}</label>
+    <textarea id="ov" placeholder='{"dining_intro": "…"}'></textarea>
+    <div class="btns"><button id="bOv" ${["awaiting_approval", "failed", "succeeded"].includes(j.status) ? "" : "disabled"}>Apply edits and rebuild</button></div>
+    <label>Log</label><pre id="log">${esc(logText)}</pre>`;
+  $("log").scrollTop = 1e9;
+  const blob = async (name, type) => URL.createObjectURL(new Blob([await (await api(`/deal-rooms/${current}/artifacts/${name}`)).blob()], { type }));
+  // Review pages are opened from a Blob because artifact downloads require an
+  // API key. Give that document the app's origin as its base so relative image
+  // preview URLs (/deal-rooms/<id>/media/<key>) still resolve correctly.
+  const reviewBlob = async () => {
+    const page = await (await api(`/deal-rooms/${current}/artifacts/review.html`)).text();
+    const base = `<base href="${location.origin}/">`;
+    return URL.createObjectURL(new Blob([page.replace("<head>", "<head>" + base)], { type: "text/html" }));
+  };
+  const act = (id, fn) => { const b = $(id); if (b) b.onclick = async () => { try { await fn(); } catch (e) { alert(e.message); } show(); refresh(); }; };
+  act("bReview", async () => window.open(await reviewBlob(), "_blank", "noopener"));
+  act("bShot", async () => window.open(await blob("page.png", "image/png"), "_blank", "noopener"));
+  act("bTpl", async () => window.open(await blob("template.json", "application/json"), "_blank", "noopener"));
+  act("bLoader", async () => { const a = document.createElement("a"); a.href = await blob("loader.js", "text/javascript"); a.download = `deal-room-loader-${current}.js`; a.click(); });
+  act("bApprove", async () => { if (confirm(j.input.load === "api" ? "Load this deal room into Hippo page " + j.input.hippo_page_id + "? A backup is taken first." : "Approve and produce the loader file?")) await api(`/deal-rooms/${current}/approve`, { method: "POST" }); });
+  act("bRollback", async () => { if (confirm("Restore page " + j.input.hippo_page_id + " from the backup taken before loading?")) await api(`/deal-rooms/${current}/rollback`, { method: "POST" }); });
+  act("bCancel", async () => { if (confirm("Cancel this job?")) await api(`/deal-rooms/${current}/cancel`, { method: "POST" }); });
+  act("bOv", async () => { const t = $("ov").value.trim(); if (!t) return; JSON.parse(t); await api(`/deal-rooms/${current}/overrides`, { method: "POST", body: t }); });
+}
+
+setInterval(() => { refresh(); const ta = $("ov"); if (current && !(ta && (ta.value || document.activeElement === ta))) show(); }, 3000);
+refresh();
+</script>
+</body>
+</html>
