@@ -871,3 +871,55 @@ test("photos: the deal room's photos are exported by key, and the assets a perso
   assert.notEqual(r3.status, 0, "a harvest with no photo-key names changes nothing");
   assert.match(r3.stderr, /named like a photo key/);
 });
+
+test("scrape command: the hotel's scrape is saved under hotel_scraps, from a headless capture or from a file made in the browser", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hotel-scraps-")), home = fs.mkdtempSync(path.join(os.tmpdir(), "fake-home-"));
+  const env = { ...process.env, HOTEL_SCRAPS_DIR: dir, HOME: home };
+  const cli = (...a) => spawnSync(process.execPath, ["src/cli.js", ...a], { cwd: ROOT, env, encoding: "utf8", timeout: 180000 });
+
+  const r1 = cli("scrape", "--url", SITE);
+  assert.equal(r1.status, 0, r1.stdout + r1.stderr);
+  const files = fs.readdirSync(dir);
+  assert.equal(files.length, 1, "one file, no stray temp files");
+  assert.match(files[0], /^grand-azure-[0-9a-f]{8}\.json$/, "named by the hotel's id");
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, files[0]), "utf8"));
+  assert.ok(Array.isArray(saved.images) && saved.images.length > 3 && saved.url.startsWith(SITE.slice(0, 22)), "a real scrape of the hotel's page");
+  assert.match(r1.stdout, /saved .*\.json \(\d+ KB, \d+ images/);
+  assert.match(r1.stdout, /--scrape /, "the next command is spelled out");
+  assert.equal(fs.readdirSync(os.tmpdir()).filter(n => n.startsWith("hotel-scrape-")).length, 0, "the scratch folder is cleaned up");
+  assert.match(cli("scrape", "--url", SITE).stdout, /replaced /, "scraping again replaces the file");
+  assert.equal(fs.readdirSync(dir).length, 1);
+
+  // a scrape made in the browser (what a site that blocks servers needs): awkward file name, saved under the clean one
+  const dl = path.join(home, "Downloads"); fs.mkdirSync(dl);
+  const odd = path.join(dl, "hotel-scrape-grand-azure (2).json"); fs.writeFileSync(odd, JSON.stringify({ ...saved, marker: "from-browser" }));
+  fs.rmSync(path.join(dir, files[0]));
+  const r2 = cli("scrape", "--url", SITE, "--from", odd);
+  assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, files[0]), "utf8")).marker, "from-browser", "the browser file was saved under the hotel's id");
+  assert.ok(fs.existsSync(odd), "the original download is left alone");
+
+  // --from latest picks the newest hotel-scrape-*.json in Downloads
+  const old = path.join(dl, "hotel-scrape-old.json"), fresh = path.join(dl, "hotel-scrape-new.json");
+  fs.writeFileSync(old, JSON.stringify({ ...saved, marker: "old" })); fs.writeFileSync(fresh, JSON.stringify({ ...saved, marker: "new" }));
+  fs.utimesSync(old, new Date(Date.now() - 3600e3), new Date(Date.now() - 3600e3)); fs.utimesSync(odd, new Date(Date.now() - 7200e3), new Date(Date.now() - 7200e3));
+  assert.equal(cli("scrape", "--url", SITE, "--from", "latest").status, 0);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, files[0]), "utf8")).marker, "new");
+
+  // refusals change nothing
+  const before = fs.readFileSync(path.join(dir, files[0]), "utf8");
+  const wrongHost = path.join(home, "wrong.json"); fs.writeFileSync(wrongHost, JSON.stringify({ ...saved, url: "https://www.some-other-hotel.example/hotels/x/" }));
+  const r3 = cli("scrape", "--url", SITE, "--from", wrongHost);
+  assert.equal(r3.status, 64); assert.match(r3.stderr, /was made on some-other-hotel\.example, not 127\.0\.0\.1/);
+  const notScrape = path.join(home, "nope.json"); fs.writeFileSync(notScrape, JSON.stringify({ hello: 1 }));
+  assert.match(cli("scrape", "--url", SITE, "--from", notScrape).stderr, /not a scrape/);
+  assert.match(cli("scrape", "--url", SITE, "--from", path.join(home, "missing.json")).stderr, /no scrape file found/);
+  assert.match(cli("scrape", "--url", "https://www.booking.com/hotel/us/x.html").stderr, /booking\/travel site/);
+  assert.notEqual(cli("scrape", "--url", "https://user:pw@example.com/").status, 0, "credentials in the URL are refused");
+  assert.equal(fs.readFileSync(path.join(dir, files[0]), "utf8"), before, "a refused scrape leaves the saved one untouched");
+  assert.equal(fs.readdirSync(os.tmpdir()).filter(n => n.startsWith("hotel-scrape-")).length, 0, "no scratch folders left behind, even after refusals");
+
+  // and the saved file feeds the pipeline
+  const r4 = cli("run", "--url", SITE, "--page", "777002", "--scrape", path.join(dir, files[0]), "--force");
+  assert.equal(r4.status, 10, "run --scrape on the saved file reaches review: " + r4.stdout.slice(-400));
+});

@@ -1,6 +1,7 @@
 node_modules/
 .venv/
 data/
+hotel_scraps/
 .env
 __pycache__/
 *.pyc

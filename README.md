@@ -31,6 +31,22 @@ node src/cli.js run --url "https://www.tajhotels.com/en-in/hotels/jai-mahal-pala
 node src/cli.js approve <job id>
 ```
 
+Save a hotel's scrape into the project's `hotel_scraps/` folder (one file per hotel, named by its id, for example `hotel_scraps/dalpchf-hilton-dallas-park-cities-cfeb285c.json`):
+
+```bash
+node src/cli.js scrape --url "https://www.tajhotels.com/en-in/hotels/jai-mahal-palace-jaipur"
+node src/cli.js run --url "https://www.tajhotels.com/en-in/hotels/jai-mahal-palace-jaipur" --page 1605252 --scrape hotel_scraps/<hotel id>.json
+```
+
+It runs the same safety checks and headless capture as `run` (robots.txt, private addresses, retries on temporary errors) and saves only the scrape. Scraping a hotel again replaces its file. For a site that blocks servers (Hilton, for example), scrape the page in your own browser (`agent/scrape_hotel.js`, see the top of the file), then save the downloaded file into the folder under its clean name:
+
+```bash
+node src/cli.js scrape --url "https://www.hilton.com/en/hotels/dalpchf-hilton-dallas-park-cities/" --from latest     # newest hotel-scrape-*.json in ~/Downloads
+node src/cli.js scrape --url "<hotel page>" --from "~/Downloads/hotel-scrape-….json"                                  # or name the file
+```
+
+The file is checked first: it must be a scrape, made on the same site as the URL. The folder is in `.gitignore`; set `HOTEL_SCRAPS_DIR` to keep scrapes somewhere else.
+
 A hotel-specific run, using the same plan the report describes (an event-focused proposal, meeting space first, no tour video):
 
 ```bash
@@ -176,7 +192,7 @@ __hvApiInspector.mark("add image component")
 
 When done, run `__hvApiInspector.download()` to download `hippo-editor-api-report.json`; run `__hvApiInspector.stop()` to restore the page's fetch/XHR hooks. The report contains request/response shapes, paths, methods, status codes, field names, component types, and merge-field tokens. It omits request/response values and headers, redacts page IDs, and records only query parameter names. Do not test save, delete, or upload actions on a live production page; use a disposable copy. Review the report before sharing it.
 
-**Sites that block servers:** some sites block headless browsers. In that case, run `agent/scrape_hotel.js` in your own browser on the hotel page and upload the downloaded file as `scrape` (in the UI, use the "scrape file" field). The capture stage is then skipped.
+**Sites that block servers:** some sites block headless browsers. In that case, run `agent/scrape_hotel.js` in your own browser on the hotel page, save the downloaded file with `node src/cli.js scrape --url <hotel page> --from latest`, and pass it as `--scrape hotel_scraps/<hotel id>.json` (in the UI, use the "scrape file" field). The capture stage is then skipped.
 
 ## goose and goose-task-server
 

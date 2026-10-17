@@ -8,6 +8,7 @@
 //   node src/cli.js overrides <job id> <file.json>
 //   node src/cli.js retry    <job id>          (resume a failed job from the stage that failed)
 //   node src/cli.js rollback <job id>
+//   node src/cli.js scrape   --url <hotel page> [--from <file.json>|latest]   (saves the scrape to hotel_scraps/<hotel id>.json)
 //   node src/cli.js photos   <job id> [--out <folder>]   (save the deal room's photos, named by key, to upload to Hippo)
 //   node src/cli.js media    <job id> <hippo-media.json> (use the photos you uploaded: output of harvest_media.js)
 //   node src/cli.js status   <job id>
@@ -21,11 +22,12 @@
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const { spawnSync } = require("node:child_process");
 const cfg = require("./config");
 const { Jobs, validateInput, validateCustomization, stageEnv } = require("./jobs");
 
-const USAGE = fs.readFileSync(__filename, "utf8").split("\n").filter(l => l.startsWith("//")).slice(1, 20).map(l => l.slice(3)).join("\n");
+const USAGE = fs.readFileSync(__filename, "utf8").split("\n").filter(l => l.startsWith("//")).slice(1, 24).map(l => l.slice(3)).join("\n");
 const [cmd, ...rest] = process.argv.slice(2);
 const flags = {}, pos = [];
 const BOOL = ["approve", "json", "save-customization", "force", "dry-run"];
@@ -95,6 +97,51 @@ function summary(j) {
     if (j.status === "awaiting_approval" && flags.approve) { console.log("\n▶ approved from the command line (--approve)"); jobs.approve(j.id, who); j = await follow(j.id); }
     process.exit(summary(j));
   }
+  if (cmd === "scrape") {
+    const url = flags.url || pos[0] || die(USAGE);
+    const errs = validateInput({ hotel_url: url }); if (errs.length) die("✖ " + errs.join("\n✖ "));
+    const outDir = process.env.HOTEL_SCRAPS_DIR ? path.resolve(process.env.HOTEL_SCRAPS_DIR) : path.join(cfg.ROOT, "hotel_scraps");
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), "hotel-scrape-"));          // a scratch job folder: the stages need one, the result goes to hotel_scraps
+    const quit = (m, code = 1) => { fs.rmSync(work, { recursive: true, force: true }); die(m, code); };
+    const stage = name => { const r = spawnSync(cfg.python, [path.join(cfg.ROOT, "agent", "stages.py"), name, work], { cwd: cfg.ROOT, env: stageEnv({ HOTELS_DIR: path.join(work, "hotels") }, name), shell: false, encoding: "utf8", maxBuffer: 1 << 26 }); process.stdout.write(r.stdout || ""); process.stderr.write(r.stderr || ""); return r.status === null ? 1 : r.status; };
+    const why = () => { try { return JSON.parse(fs.readFileSync(path.join(work, "stage_error.json"), "utf8")); } catch { return {}; } };
+    fs.writeFileSync(path.join(work, "job.json"), JSON.stringify({ input: { hotel_url: url, flow: "email", mode: "review", load: "manual" } }));
+    if (stage("intake") !== 0) quit("✖ " + (why().message || "the hotel URL was not accepted"), 1);
+    const input = JSON.parse(fs.readFileSync(path.join(work, "input.json"), "utf8"));
+    let file, text;
+    if (flags.from) {
+      file = flags.from === "latest"
+        ? (fs.existsSync(path.join(os.homedir(), "Downloads")) ? fs.readdirSync(path.join(os.homedir(), "Downloads")).filter(n => /^hotel-scrape-.*\.json$/i.test(n)).map(n => path.join(os.homedir(), "Downloads", n)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] : null)
+        : path.resolve(flags.from.replace(/^~(?=\/|$)/, os.homedir()));
+      if (!file || !fs.existsSync(file)) quit("✖ no scrape file found" + (flags.from === "latest" ? " (looked for hotel-scrape-*.json in ~/Downloads)" : `: ${flags.from}`), 64);
+      text = fs.readFileSync(file, "utf8");
+      let data; try { data = JSON.parse(text); } catch (e) { quit(`✖ ${file} is not valid JSON: ${e.message}`, 64); }
+      if (!data || !Array.isArray(data.images) || typeof data.url !== "string") quit("✖ that is not a scrape: it should be the file downloaded by agent/scrape_hotel.js", 64);
+      const host = u => { try { return new URL(u).hostname.replace(/^www\./, "").toLowerCase(); } catch { return ""; } };
+      if (host(data.url) !== host(input.hotel_url)) quit(`✖ this scrape was made on ${host(data.url) || "an unknown site"}, not ${host(input.hotel_url)}: scrape the hotel's own page`, 64);
+      console.log(`▶ using ${file}`);
+    } else {
+      let code = 1;
+      for (let attempt = 1; attempt <= cfg.retryMaxAttempts; attempt++) {
+        code = stage("capture");
+        if (code === 0 || code !== 3) break;                                                   // 3 = temporary (network, 429, 5xx): worth another go
+        const wait = Math.min((why().retry_after || 0) * 1000 || cfg.retryBaseMs * 2 ** (attempt - 1), cfg.retryMaxMs);
+        if (attempt < cfg.retryMaxAttempts) { console.log(`… temporary problem, trying again in ${Math.round(wait / 1000)}s (${attempt}/${cfg.retryMaxAttempts})`); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait); }
+      }
+      if (code !== 0) quit("✖ " + (why().message || "capture failed") + (/refuses automated access|HTTP 40[13]/.test(why().message || "") ? `\n\nThis site blocks servers. Scrape it in your own browser (run agent/scrape_hotel.js on the hotel page: see the top of that file), then:\n  node src/cli.js scrape --url "${url}" --from latest` : ""), 1);
+      file = path.join(work, "scrape.json"); text = fs.readFileSync(file, "utf8");
+    }
+    fs.mkdirSync(outDir, { recursive: true });
+    const dest = path.join(outDir, input.hotel_id + ".json"), had = fs.existsSync(dest);
+    fs.writeFileSync(dest + ".tmp", text); fs.renameSync(dest + ".tmp", dest);
+    const d = JSON.parse(text);
+    fs.rmSync(work, { recursive: true, force: true });
+    const rel = path.relative(process.cwd(), dest) || dest;
+    console.log(`\n✔ ${had ? "replaced" : "saved"} ${rel} (${Math.round(text.length / 1024)} KB, ${d.images.length} images, ${(d.subpages || []).length} sub-pages)`);
+    console.log(`Next: node src/cli.js run --url "${input.hotel_url}" --page <hippo page id> --scrape ${rel}`);
+    process.exit(0);
+  }
+
   if (["photos", "media"].includes(cmd)) {
     const id = pos[0] || die(USAGE);
     if (!jobs.get(id)) die("✖ job not found: " + id, 1);
