@@ -30,15 +30,30 @@ CONF = {"structured": 0.95, "quoted": 0.85, "extracted": 0.55, "normalized": 0.7
 
 
 # ------------------------------------------------------------------ identity
+LANGS = set("en fr de es it pt nl ja zh ko ru ar tr th vi sv da fi cs hu el he hi pl".split())     # a bare two-letter first segment is a locale only if it is a language
+TRAILING = S2C.SECTION_WORDS | {"hoteldetail", "index", "index.html", "overview", "default.aspx"}
+
+
+def hotel_path(path):
+    """The path that identifies ONE hotel (original case): its overview page, without a trailing section page."""
+    base = S2C.hotel_base_path(path).rstrip("/")
+    if re.fullmatch(r"[A-Za-z]{2,3}", base.rsplit("/", 1)[-1]):      # ends in a country or language code (…/hotels/us): that prefix is shared by many hotels
+        parts = [p for p in path.split("/") if p]
+        while parts and parts[-1].lower() in TRAILING: parts.pop()
+        base = "/" + "/".join(parts)
+    return base
+
+
 def hotel_identity(url):
-    """Stable id from the official host + the hotel's own path (leading locale segment ignored)."""
+    """Stable id from the official host + the hotel's own path. A locale segment (en-in, or a language code) is ignored; a state or city code is not."""
     u = urllib.parse.urlparse(url)
     host = re.sub(r"^www\.", "", (u.hostname or "").lower())
-    base = S2C.hotel_base_path(u.path).rstrip("/").lower()
-    base = re.sub(r"^/[a-z]{2}(?:-[a-z]{2,4})?(?=/|$)", "", base)
+    official = hotel_path(u.path); base = official.lower()
+    m = re.match(r"^/([a-z]{2})(?:-([a-z]{2,4}))?(?=/|$)", base)
+    if m and (m.group(2) or m.group(1) in LANGS): base = base[m.end():]
     last = base.rsplit("/", 1)[-1] or host.split(".")[0]
     key = host + base
-    return {"hotel_id": f"{slugify(last, 40) or 'hotel'}-{digest(key, 8)}", "key": key, "host": host, "base_path": base}
+    return {"hotel_id": f"{slugify(last, 40) or 'hotel'}-{digest(key, 8)}", "key": key, "host": host, "base_path": base, "official_path": official}
 
 
 # ------------------------------------------------------------------ store
@@ -97,7 +112,7 @@ class Store:
             jwrite(self.path(hid, "versions", f"v{int(version)}.json"), p)
             idx = self.index(hid)
             if idx["latest_version"] == int(version): jwrite(self.path(hid, "profile.json"), p)
-            jwrite(self.path(hid, "index.json"), {**idx, "approved_version": int(version)})
+            jwrite(self.path(hid, "index.json"), {**idx, "approved_version": max(idx.get("approved_version") or 0, int(version))})   # approving an older version never un-approves a newer one
             return p
 
     def generations(self, hid):
@@ -114,9 +129,12 @@ class Store:
     def save_customization(self, hid, custom, version, by):
         """Make `custom` the hotel's saved customization. Approving brand-asset rights records who did, and when."""
         c = copy.deepcopy(custom); ar = c.get("asset_rights"); ts = now_iso()
-        if ar and ar.get("approved"): ar["approved_by"], ar["approved_at"] = by, ts
         with self.lock(hid):
             prev = jread(self.path(hid, "customization.json"), {}) or {}
+            was = (prev.get("customization") or {}).get("asset_rights") or {}
+            if ar and ar.get("approved"):           # who approved the rights, and when, is kept when the approval is unchanged and stamped only when it is new
+                kept = was.get("approved") and was.get("approved_by")
+                ar["approved_by"], ar["approved_at"] = (was["approved_by"], was.get("approved_at")) if kept else (by, ts)
             jwrite(self.path(hid, "customization.json"), {"customization": c, "version": version, "updated_by": by, "updated_at": ts})
             with open(self.path(hid, "audit.jsonl"), "a", encoding="utf-8") as f:
                 f.write(json.dumps({"at": ts, "event": "customization_saved", "by": by, "version": version, "previous_version": prev.get("version"),
@@ -194,21 +212,28 @@ def build_profile(*, hotel, inp, h, cfg, facts, cp, ov, custom, scrape, plan_bra
         else: add("property_summary", summary, "extracted", 0.8, inp["hotel_url"], "structured_data" if ld.get("description") else "meta_tag")
 
     # rooms / venues / amenities
-    room_facts = [f for f in facts or [] if f["field"] == "room_type"]
+    def status_of(kind, name, full, overridden):
+        """(fact, status) for one table row. Facts are matched by the row's own name, never by position. A row is only as verified as the
+        hotel's page: if the cells differ from what the page said, or a reviewer replaced the table, it is a manual correction."""
+        f = next((x for x in facts or [] if x["field"] == kind and str(x["value"]).split(" | ")[0].strip().lower() == U(name).strip().lower()), None)
+        if f and str(f["value"]) == full: return f, ("officially_verified" if f.get("verified") else "extracted")
+        if f or overridden: return None, "manually_corrected"
+        return None, "extracted"
     rooms = []
     for i, r in enumerate((h.get("room_types") or {}).get("rows", [])):
-        f = room_facts[i] if i < len(room_facts) else None
+        f, st = status_of("room_type", r[0], U(" | ".join(r)), "room_types" in ov)
         rooms.append({"room_id": f"room_{i + 1}", "room_name": U(r[0]), "room_category": None, "description": None,
                       "features": [U(r[1])] if len(r) > 1 and r[1] else [], "capacity": U(r[2]) if len(r) > 2 and r[2] else None,
-                      "source_url": f and f.get("source_url"), "verification_status": "officially_verified" if f and f.get("verified") else "extracted"})
+                      "source_url": f and f.get("source_url"), "verification_status": st})
     cols = (h.get("venues") or {}).get("columns", [])
-    venue_facts = [f for f in facts or [] if f["field"] == "venue"]
     venues = []
     for i, r in enumerate((h.get("venues") or {}).get("rows", [])):
-        f = venue_facts[i] if i < len(venue_facts) else None
+        f, st = status_of("venue", r[0], U(r[0]) + " | " + " | ".join(r[1:]), "venues" in ov)
         caps = {cols[j]: U(r[j]) for j in range(2, min(len(r), len(cols))) if r[j] not in ("—", "")}
         venues.append({"venue_id": f"venue_{i + 1}", "name": U(r[0]), "area": U(r[1]) if len(r) > 1 else "", "capacities": caps,
-                       "source_url": f and f.get("source_url"), "verification_status": "officially_verified" if f and f.get("verified") else "extracted"})
+                       "source_url": f and f.get("source_url"), "verification_status": st})
+    table_prov = lambda items: ("manually_corrected" if any(x["verification_status"] == "manually_corrected" for x in items)
+                                else "officially_verified" if all(x["verification_status"] == "officially_verified" for x in items) else "extracted")
     amen_src = (h.get("amenities_line") or "")
     amenities = []
     if amen_src and "amenities_line" not in fallbacks:
@@ -217,8 +242,8 @@ def build_profile(*, hotel, inp, h, cfg, facts, cp, ov, custom, scrape, plan_bra
             amenities.append({"amenity_id": f"amenity_{i + 1}", "name": a, "category": None, "description": None, "source_url": None,
                               "verification_status": "manually_corrected" if manual else "normalized"})
     first_src = lambda items: next((x["source_url"] for x in items if x.get("source_url")), None)
-    if rooms: add("rooms", f"{len(rooms)} room types", "officially_verified" if all(r["verification_status"] == "officially_verified" for r in rooms) else "extracted", CONF["quoted"], first_src(rooms), "page_text")
-    if venues: add("venues", f"{len(venues)} venues", "officially_verified" if all(v["verification_status"] == "officially_verified" for v in venues) else "extracted", CONF["quoted"], first_src(venues), "page_text")
+    if rooms: add("rooms", f"{len(rooms)} room types", table_prov(rooms), CONF["manual" if table_prov(rooms) == "manually_corrected" else "quoted"], first_src(rooms), "reviewer_override" if table_prov(rooms) == "manually_corrected" else "page_text")
+    if venues: add("venues", f"{len(venues)} venues", table_prov(venues), CONF["manual" if table_prov(venues) == "manually_corrected" else "quoted"], first_src(venues), "reviewer_override" if table_prov(venues) == "manually_corrected" else "page_text")
     if amenities: add("amenities", f"{len(amenities)} amenities", "manually_corrected" if "amenities_line" in ov else "normalized", CONF["normalized"], None, "keyword_match")
     for k in ("checkin", "checkout", "rooms", "outlets"):
         f = facts_by.get(k)
@@ -263,7 +288,7 @@ def build_profile(*, hotel, inp, h, cfg, facts, cp, ov, custom, scrape, plan_bra
     sv = source_verification(inp, scrape, ld)
     profile = {
         "schema": 1, "hotel_id": ident["hotel_id"], "property_name": name,
-        "official_website_url": f"{off.scheme}://{off.netloc}{S2C.hotel_base_path(off.path).rstrip('/')}",
+        "official_website_url": f"{off.scheme}://{off.netloc}{ident['official_path']}",
         "brand_name": brand_name, "address": address, "city": city, "region": ld_addr.get("addressRegion") if isinstance(ld_addr.get("addressRegion"), str) else None,
         "country": country if isinstance(country, str) else None, "language": None, "currency": None, "timezone": None,
         "property_summary": summary, "sales_contact": None, "phone": phone, "email": email,
@@ -325,7 +350,7 @@ def validate_profile(p, allow_http=False):
     url = p.get("official_website_url") or ""
     if url and not re.match(r"https://[^/\s@]+", url) and not (allow_http and url.startswith("http://")): C(1, "BAD_URL", "SOURCE_UNVERIFIED", "official_website_url must be an https URL", ["official_website_url"])
     if p.get("phone") and not (7 <= len(re.sub(r"\D", "", p["phone"])) <= 15 and re.fullmatch(r"[\d\s+().\-/xext]+", p["phone"], re.I)): W(1, "BAD_PHONE", "CONFLICTING_DATA", f"phone '{p['phone']}' is not a valid phone number", ["phone"])
-    if p.get("email") and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", p["email"]): W(1, "BAD_EMAIL", "CONFLICTING_DATA", f"email '{p['email']}' is not valid", ["email"])
+    if p.get("email") and (len(p["email"]) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", p["email"])): W(1, "BAD_EMAIL", "CONFLICTING_DATA", f"email '{p['email']}' is not valid", ["email"])
     if p.get("currency") and not re.fullmatch(r"[A-Z]{3}", p["currency"]): W(1, "BAD_CURRENCY", "CONFLICTING_DATA", "currency must be an ISO 4217 code", ["currency"])
     for a in p.get("assets", []):
         u = a.get("source_url") or ""

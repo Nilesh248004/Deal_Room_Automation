@@ -76,9 +76,11 @@ def save_cache(path, cache, records):
     jwrite(path, dict(sorted(keep.items(), key=lambda kv: -kv[1]["_ts"])[:500]))
 
 
-def prune_media(h, assets, pol):
-    """(h2, notes): h with unreachable or duplicate photos removed and emptied slots refilled. Only under 'enforce'."""
+def prune_media(h, assets, pol, changes=None):
+    """(h2, notes): h with unreachable or duplicate photos removed and emptied slots refilled. Only under 'enforce'.
+    `changes`, if given, receives one dict per removal / substitution / duplicate (kind, key, transient, note) for QA."""
     notes = []
+    changes = changes if changes is not None else []
     if pol != "enforce": return h, notes
     h = copy.deepcopy(h); media, slots = h.get("media") or {}, h.get("slots") or {}
     rec = lambda k: assets.get(media[k]["source_url"]) or {}
@@ -87,10 +89,14 @@ def prune_media(h, assets, pol):
     for k in media:                                        # same picture under two URLs: keep the first key
         r = rec(k)
         if k in bad or not r.get("sha256"): continue
-        if r["sha256"] in seen: repl[k] = seen[r["sha256"]]; bad.add(k); notes.append(f"{k} is the same picture as {seen[r['sha256']]}: kept one")
+        if r["sha256"] in seen:
+            repl[k] = seen[r["sha256"]]; bad.add(k); notes.append(f"{k} is the same picture as {seen[r['sha256']]}: kept one")
+            changes.append({"kind": "duplicate", "key": k, "transient": False, "note": notes[-1]})
         else: seen[r["sha256"]] = k
     for k in sorted(bad):
-        if k not in repl: notes.append(f"{k} removed: {rec(k).get('error', 'unusable')}")
+        if k not in repl:
+            notes.append(f"{k} removed: {rec(k).get('error', 'unusable')}")
+            changes.append({"kind": "removed", "key": k, "transient": bool(rec(k).get("transient")), "note": notes[-1]})
     for k in bad: media.pop(k, None)
     spare = [k for k in media if rec(k).get("ok")]        # only a photo that was actually verified may stand in for a missing one
     for name, keys in slots.items():
@@ -100,6 +106,7 @@ def prune_media(h, assets, pol):
             k = repl.get(k, k)
             if k in media and k not in kept: kept.append(k)
         if not kept and spare:
-            kept = spare[:1]; notes.append(f"slot '{name}' had no working photo: using {kept[0]}")
+            kept = spare[:1]; notes.append(f"slot '{name}' had no working photo: using {kept[0]}, a different photo")
+            changes.append({"kind": "substituted", "key": name, "transient": False, "note": notes[-1]})
         slots[name] = kept
     return h, notes

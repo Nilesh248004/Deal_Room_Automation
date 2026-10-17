@@ -7,7 +7,7 @@ are filtered with host_is_public() from the capture stage.
 ALLOW_PRIVATE_HOSTS=1 turns the private-network checks off. It exists only so the test suite can talk to a
 mock site on 127.0.0.1; never set it in production.
 """
-import ipaddress, os, re, socket, urllib.error, urllib.parse, urllib.request, urllib.robotparser
+import ipaddress, os, re, socket, time, urllib.error, urllib.parse, urllib.request, urllib.robotparser
 
 UA = "Mozilla/5.0 (compatible; DealRoomAgent/1.0)"
 ROBOTS_TOKEN = "DealRoomAgent"
@@ -33,10 +33,12 @@ def _is_public_ip(addr):
     return ip.is_global
 
 
-_dns_cache = {}
+_dns_cache = {}     # host -> (checked_at, ok); short-lived so a changed answer is noticed
+DNS_TTL = 30
 
-def host_is_public(host, resolve=True):
-    """True when every address the host resolves to is a public one. Unresolvable hosts return True (the request itself will fail).
+def host_is_public(host, resolve=True, fail_closed=False):
+    """True when every address the host resolves to is a public one. A host that does not resolve passes unless fail_closed
+    (our own requests simply fail; for Chromium, which resolves again by itself, an unresolvable name is refused).
     resolve=False checks only the literal form (IP address or a local-looking name) and never touches DNS."""
     if allow_private(): return True
     host = (host or "").strip("[]").lower()
@@ -44,17 +46,19 @@ def host_is_public(host, resolve=True):
     try: return _is_public_ip(host)                       # literal IP
     except ValueError: pass
     if not resolve: return True
-    if host in _dns_cache: return _dns_cache[host]
+    hit = _dns_cache.get(host)
+    if hit and time.monotonic() - hit[0] < DNS_TTL: return hit[1]
     try: infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror: return True
+    except socket.gaierror: return not fail_closed
     ok = all(_is_public_ip(i[4][0]) for i in infos)
-    _dns_cache[host] = ok
+    _dns_cache[host] = (time.monotonic(), ok)
     return ok
 
 
 def check_url(url, allow_http=None, resolve=True):
     """Raise Unsafe unless url is an http(s) URL without credentials, on a standard port, to a public host."""
     allow_http = os.environ.get("ALLOW_HTTP") == "1" if allow_http is None else allow_http
+    if "\\" in url or any(ord(c) < 32 for c in url): raise Unsafe("URL contains a backslash or control character")      # Python and Chromium would read the host differently
     try: u = urllib.parse.urlparse(url)
     except ValueError: raise Unsafe("not a valid URL")
     if u.scheme not in ("https", "http"): raise Unsafe(f"unsupported URL scheme '{u.scheme}'")
@@ -80,7 +84,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirect)
 
 
-def fetch(url, *, max_bytes=2_000_000, timeout=10, headers=None, max_redirects=4, method="GET"):
+def fetch(url, *, max_bytes=2_000_000, timeout=10, headers=None, max_redirects=4, method="GET", deadline=30):
     """Fetch url with every hop validated. Returns (status, headers, body). Raises Unsafe or Transient.
 
     4xx answers are returned (the caller decides); 429 and 5xx raise Transient with Retry-After when given.
@@ -91,9 +95,14 @@ def fetch(url, *, max_bytes=2_000_000, timeout=10, headers=None, max_redirects=4
         req = urllib.request.Request(url, headers=hdrs, method=method)
         try:
             with _opener.open(req, timeout=timeout) as r:
-                body = r.read(max_bytes + 1)
-                if len(body) > max_bytes: raise Unsafe(f"response is larger than {max_bytes} bytes")
-                return r.status, r.headers, body
+                t0, buf = time.monotonic(), bytearray()
+                while True:                                          # a total deadline, not just a per-read timeout: a slow drip must not hold a stage
+                    chunk = r.read(65536)
+                    if not chunk: break
+                    buf += chunk
+                    if len(buf) > max_bytes: raise Unsafe(f"response is larger than {max_bytes} bytes")
+                    if time.monotonic() - t0 > deadline: raise Transient(f"response from {urllib.parse.urlparse(url).hostname} is too slow")
+                return r.status, r.headers, bytes(buf)
         except urllib.error.HTTPError as e:
             if e.code in (301, 302, 303, 307, 308):
                 to = e.headers.get("Location")
@@ -106,6 +115,7 @@ def fetch(url, *, max_bytes=2_000_000, timeout=10, headers=None, max_redirects=4
             return e.code, e.headers, e.read(max_bytes) if method != "HEAD" else b""
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as e:
             if isinstance(getattr(e, "reason", None), socket.gaierror): raise Unsafe(f"host not found: {urllib.parse.urlparse(url).hostname}")   # DNS says no: retrying will not help
+            if re.search(r"Tunnel connection failed: 4\d\d", str(getattr(e, "reason", e))): raise Unsafe(f"refused by the network proxy: {getattr(e, 'reason', e)}")   # a proxy that says 403 is a policy, not a blip
             raise Transient(f"{type(e).__name__}: {getattr(e, 'reason', e)}")
     raise Unsafe("too many redirects")
 

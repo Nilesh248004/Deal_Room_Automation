@@ -29,7 +29,7 @@ const crypto = require("node:crypto");
 const dns = require("node:dns").promises;
 const net = require("node:net");
 const cfg = require("./config");
-const { Jobs, validateInput, validateCustomization, ARTIFACTS, artifactPath } = require("./jobs");
+const { Jobs, validateInput, validateCustomization, ARTIFACTS, artifactPath, stable } = require("./jobs");
 
 const sha = s => crypto.createHash("sha256").update(String(s)).digest();
 const KEYS = cfg.apiKeys.map(k => ({ name: k.name, role: k.role, h: sha(k.key) }));
@@ -59,7 +59,7 @@ function readBody(req) {
     req.on("data", c => { size += c.length; if (size > cfg.maxBodyBytes) { reject(Object.assign(new Error("body too large"), { status: 413 })); req.destroy(); } else chunks.push(c); });
     req.on("end", () => {
       if (!size) return resolve({});
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch { reject(Object.assign(new Error("body is not valid JSON"), { status: 400 })); }
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"), (k, v) => (k === "__proto__" ? undefined : v))); } catch { reject(Object.assign(new Error("body is not valid JSON"), { status: 400 })); }
     });
     req.on("error", reject);
   });
@@ -68,8 +68,12 @@ function readBody(req) {
 function publicJob(j) { const { ...o } = j; return o; }
 
 function isPrivateAddress(address) {
-  if (net.isIP(address) === 4) {
-    const p = address.split(".").map(Number);
+  let a = String(address).toLowerCase();
+  const mapped = a.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/), hex = a.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mapped) a = mapped[1];                                               // ::ffff:10.0.0.1 is 10.0.0.1
+  else if (hex) { const n = ((parseInt(hex[1], 16) << 16) | parseInt(hex[2], 16)) >>> 0; a = [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join("."); }
+  if (net.isIP(a) === 4) {
+    const p = a.split(".").map(Number);
     return p[0] === 0 || p[0] === 10 || p[0] === 127 || p[0] >= 224 ||
       (p[0] === 100 && p[1] >= 64 && p[1] <= 127) ||
       (p[0] === 169 && p[1] === 254) ||
@@ -77,8 +81,7 @@ function isPrivateAddress(address) {
       (p[0] === 192 && (p[1] === 168 || (p[1] === 0 && p[2] === 0) || (p[1] === 0 && p[2] === 2) || (p[1] === 88 && p[2] === 99))) ||
       (p[0] === 198 && (p[1] === 18 || p[1] === 19));
   }
-  const v = address.toLowerCase();
-  return v === "::1" || v.startsWith("fc") || v.startsWith("fd") || v.startsWith("fe80:") || v.startsWith("::ffff:127.");
+  return a === "::" || a === "::1" || /^f[cd]/.test(a) || /^fe[89ab]/.test(a) || a.startsWith("ff");
 }
 
 async function assertPublicHttps(url) {
@@ -87,32 +90,40 @@ async function assertPublicHttps(url) {
   if (!addresses.length || addresses.some(x => isPrivateAddress(x.address))) throw Object.assign(new Error("unsafe preview image host"), { status: 400 });
 }
 
+const PREVIEW_MAX = 12 * 1024 * 1024;
+const RASTER = /^image\/(png|jpe?g|gif|webp|avif)$/i;     // never SVG: it can carry script and this is served from the API's origin
 async function previewImage(dir, key, res) {
   const config = JSON.parse(fs.readFileSync(path.join(dir, "config.json"), "utf8"));
-  const source = config.media && config.media[key] && config.media[key].source_url;
+  const logo = /^logo_(\d{1,2})$/.exec(key);
+  const source = logo ? (config.logos && config.logos[+logo[1] - 1] || {}).url : config.media && config.media[key] && config.media[key].source_url;
   if (typeof source !== "string") throw Object.assign(new Error("preview image not found"), { status: 404 });
   const sourcePage = typeof config._generated_from === "string" && config._generated_from.startsWith("https://") ? config._generated_from : undefined;
   let url = new URL(source);
   for (let redirects = 0; redirects < 4; redirects++) {
     await assertPublicHttps(url);
     const upstream = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(15000), headers: {
-      "accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      "accept": "image/avif,image/webp,image/apng,image/*;q=0.8",
       "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
       ...(sourcePage ? { referer: sourcePage } : {}),
     } });
     if ([301, 302, 303, 307, 308].includes(upstream.status)) {
       const to = upstream.headers.get("location");
+      try { await upstream.body?.cancel(); } catch {}
       if (!to) throw Object.assign(new Error("preview image redirect has no location"), { status: 502 });
       url = new URL(to, url);
       continue;
     }
-    if (!upstream.ok || !/^image\//i.test(upstream.headers.get("content-type") || ""))
-      return send(res, 502, { error: "preview image unavailable" });
-    const length = +(upstream.headers.get("content-length") || 0);
-    if (length > 12 * 1024 * 1024) throw Object.assign(new Error("preview image is too large"), { status: 413 });
-    const image = Buffer.from(await upstream.arrayBuffer());
-    if (image.length > 12 * 1024 * 1024) throw Object.assign(new Error("preview image is too large"), { status: 413 });
-    return send(res, 200, image, upstream.headers.get("content-type"), { "cache-control": "private, max-age=3600" });
+    const type = (upstream.headers.get("content-type") || "").split(";")[0].trim();
+    if (!upstream.ok || !RASTER.test(type)) { try { await upstream.body?.cancel(); } catch {} return send(res, 502, { error: "preview image unavailable" }); }
+    if (+(upstream.headers.get("content-length") || 0) > PREVIEW_MAX) { try { await upstream.body?.cancel(); } catch {} throw Object.assign(new Error("preview image is too large"), { status: 413 }); }
+    const reader = upstream.body.getReader(), chunks = []; let total = 0;     // stop reading at the cap instead of buffering whatever the host sends
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      total += value.length;
+      if (total > PREVIEW_MAX) { try { await reader.cancel(); } catch {} throw Object.assign(new Error("preview image is too large"), { status: 413 }); }
+      chunks.push(value);
+    }
+    return send(res, 200, Buffer.concat(chunks), type, { "cache-control": "private, max-age=3600", "content-security-policy": "default-src 'none'; sandbox" });
   }
   throw Object.assign(new Error("too many preview image redirects"), { status: 502 });
 }
@@ -135,9 +146,11 @@ function createServer(jobs) {
   jobs.on("exception", exceptionHook);
   const ui = fs.readFileSync(path.join(__dirname, "ui.html"));
   const links = id => ({ self: `/deal-rooms/${id}`, logs: `/deal-rooms/${id}/logs`, audit: `/deal-rooms/${id}/audit`, review: `/deal-rooms/${id}/artifacts/review.html` });
-  return http.createServer(async (req, res) => {
-    const url = new URL(req.url, "http://x");
-    const parts = url.pathname.replace(/\/+$/, "").split("/").filter(Boolean);
+  const handle = async (req, res) => {
+    let url;
+    try { url = new URL(req.url, "http://x"); } catch { return send(res, 400, { error: "bad request target" }); }
+    let p = url.pathname; while (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);       // (a regex here is quadratic on a long run of slashes)
+    const parts = p.split("/").filter(Boolean);
     const q = k => url.searchParams.get(k) || undefined;
     try {
       if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, queue: jobs.queue.length, running: jobs.running.size });
@@ -189,7 +202,11 @@ function createServer(jobs) {
         if (parts[2] === "audit" && req.method === "GET") return send(res, 200, { events: jobs.hotels.audit(id) });
         if (parts[2] === "customization" && req.method === "PUT") {
           const b = await readBody(req);
-          if (mentionsAssetRights(b)) requireRole(user, "admin");
+          // Brand-asset rights are an admin decision. Leaving them out keeps what is stored; sending them back unchanged (an operator editing
+          // the rest of the JSON in the UI) is fine; changing or adding them needs an admin key.
+          const stored = (h.customization || {}).asset_rights;
+          if (mentionsAssetRights(b)) { if (stable(b.asset_rights) !== stable(stored)) requireRole(user, "admin"); }
+          else if (stored) b.asset_rights = stored;
           const v = await validateCustomization(b);
           if (!v.ok) return send(res, 400, { error: "invalid customization", details: v.errors });
           return send(res, 200, jobs.hotels.saveCustomization(id, v.customization, v.version, by));
@@ -207,6 +224,7 @@ function createServer(jobs) {
           if (errs.length) return send(res, 400, { error: "invalid input", details: errs });
           if (mentionsAssetRights(b.customization) || mentionsAssetRights((b.overrides || {}).customization)) requireRole(user, "admin");
           if (b.customization) { const v = await validateCustomization(b.customization); if (!v.ok) return send(res, 400, { error: "invalid customization", details: v.errors }); }
+          if (b.overrides && b.overrides.customization !== undefined) { const v = await validateCustomization(b.overrides.customization); if (!v.ok) return send(res, 400, { error: "invalid customization in overrides", details: v.errors }); }
           const { job, deduplicated } = jobs.createIdempotent(b, by);
           return send(res, deduplicated ? 200 : 202, { id: job.id, status: job.status, deduplicated, links: links(job.id) });
         }
@@ -254,11 +272,19 @@ function createServer(jobs) {
     } catch (e) {
       return send(res, e.status || 500, e.status ? { error: e.message, ...(e.conflicting_job ? { conflicting_job: e.conflicting_job } : {}) } : { error: "internal error" });
     }
+  };
+  const server = http.createServer((req, res) => {
+    handle(req, res).catch(() => { try { if (!res.headersSent) send(res, 500, { error: "internal error" }); else res.end(); } catch { /* the connection is gone */ } });
   });
+  server.on("clientError", (e, socket) => { if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"); else socket.destroy(); });
+  return server;
 }
 
 if (require.main === module) {
   if (!cfg.apiKeys.length && !cfg.allowNoAuth) { console.error("✖ Set API_KEYS (e.g. API_KEYS=ops:<long random key>) or ALLOW_NO_AUTH=1 for local testing."); process.exit(1); }
+  const weak = cfg.apiKeys.filter(k => k.key.length < 16 || /^x+$/i.test(k.key) || /change[-_ ]?me|^(secret|password|test)/i.test(k.key));
+  if (weak.length && process.env.ALLOW_WEAK_API_KEYS !== "1") { console.error(`✖ API key(s) too short or a placeholder: ${weak.map(k => k.name).join(", ")}. Use at least 16 random characters (openssl rand -hex 32), or ALLOW_WEAK_API_KEYS=1 for local testing.`); process.exit(1); }
+  process.on("unhandledRejection", e => console.error("unhandled rejection:", e && e.stack || e));
   const jobs = new Jobs();
   createServer(jobs).listen(cfg.port, cfg.host, () => console.log(`Deal Room Agent listening on http://${cfg.host}:${cfg.port} (data: ${cfg.dataDir}, concurrency ${cfg.maxConcurrent}${cfg.retentionDays ? `, retention ${cfg.retentionDays} days` : ""})`));
   if (cfg.retentionDays) {
@@ -268,4 +294,4 @@ if (require.main === module) {
   for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { for (const c of jobs.running.values()) try { c && c.kill("SIGTERM"); } catch {} process.exit(0); });
 }
 
-module.exports = { createServer };
+module.exports = { createServer, isPrivateAddress };

@@ -105,6 +105,9 @@ def validate_customization(raw):
         if k in (FIXED_FIRST, FIXED_LAST): errs.append(f"exclude_sections: '{TITLE[k]}' cannot be excluded")
     both = sorted(set(pref or []) & set(excl or []))
     if both: errs.append(f"sections cannot be both preferred and excluded: {', '.join(both)}")
+    fam_, focus_ = n.get("template_family"), n.get("focus")
+    if "meeting" in (excl or []) and (fam_ in ("meeting_space", "corporate_event") or (not fam_ and focus_ in ("event", "meetings"))):
+        errs.append("exclude_sections: Meeting Space cannot be excluded from an event- or meeting-focused proposal")
     for k in ("include_tour_videos", "include_gallery", "include_testimonials"):
         if raw.get(k) is not None:
             if not isinstance(raw[k], bool): errs.append(f"{k} must be true or false")
@@ -189,12 +192,14 @@ def make_plan(profile, h, cp, custom, version):
         fam, src = FOCUS_FAMILY[custom["focus"]], "focus"
         if [r for r in FAMILIES[fam]["requires"] if not _has(profile, r)]:
             dec.append(f"focus '{custom['focus']}' prefers '{fam}' but the hotel has no published venue capacities: using 'corporate_event'")
+            unmet.append({"request": f"focus '{custom['focus']}' (venue-table template)", "reason": "the hotel's pages published no venue capacities, so the corporate_event family was used instead"})
             fam = "corporate_event"
         else: dec.append(f"focus '{custom['focus']}' selects template family '{fam}'")
     else:
         fam, src = "standard", "default"
         dec.append("no family or focus given: standard family (the reference proposal)")
     order = list(FAMILIES[fam]["order"])
+    required = [FIXED_FIRST, FIXED_LAST] + (["meeting"] if fam in ("meeting_space", "corporate_event") else [])      # an event proposal without meeting space is not one (§8.1)
 
     # ---- 2. what the opportunity does not need, and what was excluded ----
     drop = {}
@@ -204,6 +209,11 @@ def make_plan(profile, h, cp, custom, version):
     for k in custom.get("preferred_sections", []):
         if k in drop and drop[k][0] == "RFP_NOT_NEEDED":
             dec.append(f"'{title[k]}' is preferred, so it stays although the RFP does not ask for it"); del drop[k]
+
+    for k in required:
+        if k in drop and k not in (FIXED_FIRST, FIXED_LAST):
+            blocking.append({"code": "REQUIRED_SECTION_DROPPED", "category": "REQUIRED_INFO_MISSING", "fields": [k], "message": f"'{title[k]}' is required for the {fam} family but was dropped ({drop[k][1]})"})
+            del drop[k]
 
     # ---- 3. hotel-owned content: sections that exist only to show hotel content need that content ----
     fits_ok = any(x.get("body") for x in h.get("fits") or [])
@@ -245,14 +255,13 @@ def make_plan(profile, h, cp, custom, version):
         else: unmet.append({"request": f"emphasize room '{want}'", "reason": "no room with that name was published on the hotel's pages" if rows else "the hotel's pages have no room table"})
     flags = {"tour_video_slot": bool(video_on and "gallery" in order), "featured_video": bool(video_on and fv and "gallery" in order),
              "gallery_images": bool(images_on and "gallery" in order), "cta_buttons": custom.get("cta_buttons") or list(CTA), "emphasize_rooms": found}
-    placeholders = sorted((cp or {}).get("fallbacks", []))
-    if placeholders: dec.append("generic placeholder wording is used for: " + ", ".join(placeholders) + " (no sourced text found)")
-    required = [FIXED_FIRST, FIXED_LAST] + (["meeting"] if fam == "meeting_space" else [])
+    left_out = sorted((cp or {}).get("left_out", []))
+    if left_out: dec.append("left out because nothing sourced was found on the hotel's pages: " + ", ".join(left_out))
     return {"plan_version": 1, "hotel_id": profile["hotel_id"], "profile_version": profile.get("profile_version"), "customization_version": version,
             "template_family": fam, "family_source": src, "on_unavailable": policy,
             "sections": [{"key": k, "title": unesc(title[k]), "order": i} for i, k in enumerate(order, 1)],
             "omitted": omitted, "unmet_requests": unmet, "blocking": blocking, "flags": flags, "required_sections": required,
-            "placeholders": placeholders, "special_notes": custom.get("special_notes", ""), "branding": custom.get("branding", {}),
+            "left_out": left_out, "special_notes": custom.get("special_notes", ""), "branding": custom.get("branding", {}),
             "decisions": dec}
 
 

@@ -13,7 +13,11 @@ import html, json, os, re
 
 from dealroom_builder import SECTION_ID_BY_KEY
 
-MONEY = re.compile(r"[$€£₹¥]\s?\d|\b\d[\d,.]*\s?(?:USD|EUR|GBP|INR|AUD|CAD|AED|CHF|JPY)\b|\bper night\b|\bnightly rate\b", re.I)
+_CODES = "USD|EUR|GBP|INR|AUD|CAD|AED|CHF|JPY|SGD|THB|MYR|ZAR|NZD|HKD|CNY|SAR|QAR|IDR|PHP|KRW|MXN|BRL|SEK|NOK|DKK"
+# a price in any common form: symbol or code before the amount, code after it, "Rs.", "8,000 a night", "per night", "nightly rate"
+MONEY = re.compile(r"[$€£₹¥]\s?\d|\b(?:" + _CODES + r"|Rs\.?)\s?\d|\b\d[\d,.]{0,15}\s?(?:" + _CODES + r")\b|\bper night\b|\bnightly rate\b|\b\d[\d,.]{0,15}\s?(?:/|a|per)\s?(?:night|room)\b", re.I)
+# Only real tags count: hotel text is HTML-escaped, so "&lt;img onerror=x&gt;" is harmless wording, while a raw <img onerror=x> must never be saved.
+ACTIVE_MARKUP = re.compile(r"<\s*(?:script|iframe|object|embed|svg|link|meta|base|form|style)\b|<[a-z][^<>]*?\son[a-z]{3,20}\s*=|<[^<>]*(?:javascript\s*:|data\s*:\s*text/html)", re.I)
 SAFE_HREF = re.compile(r"^(?:|#|\$\{[^}]+\}|mailto:[^\s]+|https://[^\s\"'<>]+)$")
 CTA_EXPECT = {"schedule_site_visit": ("${User.Calendar Link}", None), "request_revision": ("${User.Email}", "email"), "download_pdf": (None, None)}
 WIDE_TABLE = 7
@@ -71,8 +75,9 @@ def _images(tpl):
     return urls
 
 
-def run(*, tpl, h, plan, profile, pvalid, mapping, assets, others, flow, rights, check):
-    """rights: ASSET_RIGHTS_POLICY (require|warn); check: ASSET_CHECK_POLICY (enforce|warn|off)."""
+def run(*, tpl, h, plan, profile, pvalid, mapping, assets, others, flow, rights, check, rights_approved=False, asset_changes=()):
+    """rights: ASSET_RIGHTS_POLICY (require|warn); check: ASSET_CHECK_POLICY (enforce|warn|off);
+    rights_approved: this job's effective customization carries approved asset_rights; asset_changes: what the assets stage removed or swapped."""
     checks, crit, review, warn, not_run = [], [], [], [], []
 
     def add(level, cid, name, status, detail="", findings=()):
@@ -104,19 +109,22 @@ def run(*, tpl, h, plan, profile, pvalid, mapping, assets, others, flow, rights,
     # hotel-owned text must not carry prices: commercial values come from an approved opportunity (§7.3)
     money = []
     for where, t in _texts(tpl):
-        plain = re.sub(r"\$\{[^}]*\}", " ", re.sub(r"<[^>]+>", " ", html.unescape(t)))
+        plain = re.sub(r"\$\{[^}]*\}", " ", re.sub(r"<[^>]+>", " ", html.unescape(t[:20000])))[:6000]      # bounded: hotel text is untrusted
         m = MONEY.search(plain)
         if m: money.append(f"{where}: '{m.group(0).strip()}'")
     add("pre-render", "no_unapproved_commercial_text", "No prices or rates appear in hotel-owned text", "review" if money else "pass", "; ".join(money[:5]),
         [F("COMMERCIAL_TEXT", "COMMERCIAL_APPROVAL", f"hotel text contains commercial wording that needs approval ({x})") for x in money[:5]])
     used = {u: w for u, w in _images(tpl).items() if "hippovideo." not in u}      # images already uploaded to Hippo are Hippo's to serve
-    unapproved = [a for a in profile.get("assets", []) if a.get("usage_rights_status") != "approved" and (a.get("asset_type") == "logo" or a.get("source_url") in used)]
+    unapproved = [] if rights_approved else [a for a in profile.get("assets", []) if a.get("usage_rights_status") != "approved" and (a.get("asset_type") == "logo" or a.get("source_url") in used)]
     if unapproved and rights == "require":
         add("pre-render", "asset_rights", "Usage rights of the logo and photos are approved", "review", f"{len(unapproved)} asset(s) have unverified usage rights",
             [F("ASSET_RIGHTS_UNVERIFIED", "USAGE_RIGHTS_UNCLEAR", f"usage rights are not confirmed for {len(unapproved)} logo/photo asset(s): a hotel admin must approve them (customization asset_rights) or a reviewer must approve this job")])
     else:
         add("pre-render", "asset_rights", "Usage rights of the logo and photos are approved", "pass", "approved" if not unapproved else f"{len(unapproved)} unverified asset(s), allowed by ASSET_RIGHTS_POLICY=warn")
         if unapproved: warn.append({"code": "ASSET_RIGHTS_UNVERIFIED", "category": "USAGE_RIGHTS_UNCLEAR", "message": f"{len(unapproved)} asset(s) have unverified usage rights", "fields": [], "check": "asset_rights"})
+    chg = [c for c in asset_changes if c.get("kind") == "substituted" or (c.get("kind") == "removed" and c.get("transient"))]
+    add("pre-render", "photos_as_found", "No photo was swapped for another one or dropped over a temporary error", "review" if chg else "pass", "; ".join(c["note"] for c in chg),
+        [F("PHOTOS_CHANGED", "ASSET_MISSING", c["note"]) for c in chg])
     blob = " ".join(re.sub(r"<[^>]+>", " ", html.unescape(t)) for _, t in _texts(tpl)).lower()
     own = (profile.get("property_name") or "").lower()
     leak = [n for _, n in others if len(n) >= 8 and n.lower() not in own and own not in n.lower() and n.lower() in blob]
@@ -151,6 +159,9 @@ def run(*, tpl, h, plan, profile, pvalid, mapping, assets, others, flow, rights,
         miss_img = [u for u in used if not (assets.get(u) or {}).get("ok")] if check == "warn" else list(used)
         add("post-render", "images_resolve", "Every image in the deal room was fetched and is a valid image", "review" if miss_img else "pass" if used else "na", f"ASSET_CHECK_POLICY={check}: {len(miss_img)} of {len(used)} image(s) not verified",
             [F("IMAGES_NOT_VERIFIED", "ASSET_MISSING", f"{len(miss_img)} image(s) were not verified (ASSET_CHECK_POLICY={check})")] if miss_img else [])
+    active = [f"{w}: {m.group(0)[:30]}" for w, t in _texts(tpl) for m in [ACTIVE_MARKUP.search(t[:20000])] if m]
+    add("post-render", "no_active_markup", "No script, frame or event-handler markup in any text", "fail" if active else "pass", "; ".join(active[:5]),
+        [F("ACTIVE_MARKUP", "RENDER_FAILURE", f"text contains active markup that must never be saved ({a})") for a in active[:5]])
     bad_links = [f"{w}: {u[:60]}" for w, u in _links(tpl) if not SAFE_HREF.match(u.strip())]
     add("post-render", "links_safe", "All links use safe destinations", "fail" if bad_links else "pass", "; ".join(bad_links[:5]), [F("UNSAFE_LINK", "RENDER_FAILURE", f"unsafe link ({b})") for b in bad_links[:5]])
     cta_ids = plan["flags"]["cta_buttons"]; hb = tpl.get("header_cta_buttons", [])
@@ -171,8 +182,8 @@ def run(*, tpl, h, plan, profile, pvalid, mapping, assets, others, flow, rights,
     add("post-render", "layout_risk", "No table is likely to overflow a phone screen", "review" if wide else "pass", "; ".join(wide), [F("WIDE_TABLE", "RENDER_FAILURE", f"{w}: check it on mobile") for w in wide])
     not_run += [{"check": "mobile_and_desktop_layout", "reason": "needs a rendered Hippo page; the agent has no preview URL to open"},
                 {"check": "pdf_export", "reason": "no Hippo PDF export API is configured"}, {"check": "share_link", "reason": "no Hippo share-link API is configured"}]
-    for p in plan.get("placeholders", []):
-        warn.append({"code": "PLACEHOLDER_COPY", "category": "UNVERIFIED_CONTENT", "message": f"'{p}' uses generic wording because no sourced text was found", "fields": [p], "check": "placeholders"})
+    for p in plan.get("left_out", []):
+        warn.append({"code": "BLOCK_LEFT_OUT", "category": "UNVERIFIED_CONTENT", "message": f"'{p}' is left out: nothing sourced was found on the hotel's pages", "fields": [p], "check": "left_out"})
     outcome = "FAIL" if crit else "REVIEW" if review else "PASS"
     return {"outcome": outcome, "checks": checks, "critical": crit, "review": review, "warnings": warn, "not_run": not_run,
             "counts": {"pass": sum(1 for x in checks if x["status"] == "pass"), "review": sum(1 for x in checks if x["status"] == "review"), "fail": sum(1 for x in checks if x["status"] == "fail")}}

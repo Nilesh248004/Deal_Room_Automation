@@ -61,10 +61,15 @@ class Hotels {
     if (!this.exists(id)) throw Object.assign(new Error("hotel not found: run a deal room for it first, or pass save_customization with the job"), { status: 404 });
     const prev = readJson(this.p(id, "customization.json"), {});
     const rec = { customization, version, updated_by: by, updated_at: new Date().toISOString() };
-    if (customization.asset_rights && customization.asset_rights.approved) rec.customization.asset_rights = { ...customization.asset_rights, approved_by: by, approved_at: rec.updated_at };
+    // Who approved the rights, and when, is a legal fact: keep it when the approval is unchanged, stamp it only when it is new.
+    const ar = customization.asset_rights, was = (prev.customization || {}).asset_rights;
+    if (ar && ar.approved) {
+      const kept = was && was.approved && was.approved_by;
+      rec.customization.asset_rights = { ...ar, approved_by: kept ? was.approved_by : by, approved_at: kept ? was.approved_at : rec.updated_at };
+    }
     writeJson(this.p(id, "customization.json"), rec);
     audit.append(this.p(id, "audit.jsonl"), { event: "customization_saved", by, version, previous_version: prev.version || null,
-      asset_rights_approved: !!(customization.asset_rights && customization.asset_rights.approved) });
+      asset_rights_approved: !!(ar && ar.approved) });
     return this.detail(id);
   }
 

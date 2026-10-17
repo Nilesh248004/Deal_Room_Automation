@@ -122,7 +122,12 @@ def stage_capture(d):
         """Chromium's own requests: never reach a private network, never fetch pages robots.txt disallows."""
         u = urllib.parse.urlparse(request.url)
         if u.scheme in ("data", "blob", "about", "chrome-error"): return route.continue_()
-        if not netsafe.host_is_public(u.hostname): blocked.append(request.url); return route.abort()
+        # Chromium resolves names itself, so this check is a filter, not a guarantee (DNS can answer differently the second time):
+        # production should also deny private ranges at the network edge (see README). An unresolvable name is refused.
+        try: port = u.port
+        except ValueError: port = -1
+        if u.scheme not in ("http", "https") or (port not in (None, 80, 443) and not netsafe.allow_private()) or not netsafe.host_is_public(u.hostname, fail_closed=True):
+            blocked.append(request.url); return route.abort()
         if policy == "enforce" and rp is not None and request.resource_type in ("document", "fetch", "xhr") and netsafe.same_site(u.hostname, host) and not netsafe.robots_allows(rp, request.url):
             skipped.append(request.url); return route.abort()
         route.continue_()
@@ -131,12 +136,12 @@ def stage_capture(d):
     with sync_playwright() as p:
         br = p.chromium.launch(args=["--disable-blink-features=AutomationControlled"])
         try:
-            ctx = br.new_context(viewport={"width": 1440, "height": 900}, locale="en-US", accept_downloads=True,
+            ctx = br.new_context(viewport={"width": 1440, "height": 900}, locale="en-US", accept_downloads=True, service_workers="block",
                                  user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
                                  **({"record_har_path": f"{d}/capture/page.har", "record_har_content": "omit"} if har else {}))
             ctx.route("**/*", guard)
             pg = ctx.new_page()
-            pg.on("console", lambda m: logs.append(m.text) if "[hotel-scraper]" in m.text else None)
+            pg.on("console", lambda m: logs.append(m.text) if "[hotel-scraper]" in m.text and len(logs) < 200 else None)
             try: r = pg.goto(start, wait_until="domcontentloaded", timeout=60000)
             except Exception as e:
                 msg = str(e).splitlines()[0]
@@ -157,6 +162,8 @@ def stage_capture(d):
                     b = pg.get_by_role("button", name=t, exact=True)
                     if b.count() and b.first.is_visible(): b.first.click(timeout=2000); pg.wait_for_timeout(600); log(f"  cookie banner: clicked '{t}'"); break
                 except Exception: pass
+            if not netsafe.same_site(urllib.parse.urlparse(pg.url).hostname, host):         # the page may have navigated on its own since the first check
+                fail(f"the page moved to {urllib.parse.urlparse(pg.url).hostname}, which is not {host}", code="REDIRECT_OFF_SITE", category="SOURCE_UNVERIFIED")
             try:
                 with pg.expect_download(timeout=240000) as dl:
                     pg.evaluate(js)
@@ -314,7 +321,7 @@ def stage_copy(d):
     alltext = S2C.clean(sc.get("page_text", "")) + "\n" + page_text(sc, cfg, r".")
     meet, rooms_t = page_text(sc, cfg, r"meeting|event|venue"), page_text(sc, cfg, r"room|suite|accommodation")
     FQ = faqs(sc, cfg)
-    out, sources, fb = {}, {}, []          # fb: fields that fell back to generic wording because nothing sourced was found
+    out, sources, fb = {}, {}, []          # fb: blocks with nothing sourced behind them: they are left out of the copy, never filled with filler text
     def put(k, v, src): out[k] = v; sources[k] = src
     venues = (cfg.get("_raw") or {}).get("venues", [])
     def cap(v): return max([int(re.sub(r"\D", "", x) or 0) for x in v["seating"].values()] or [0])
@@ -361,27 +368,29 @@ def stage_copy(d):
     if rparts: put("rooms_intro", esc(" ".join(rparts)), "facts + rooms page")
     if not cfg.get("meeting_intro"):
         mi = stmt(meet, r"meeting|event|venue", 1)
-        if not mi: fb.append("meeting_intro")
-        put("meeting_intro", esc(mi or "Talk to our events team about the right space for your group."), "meetings page")
+        if mi: put("meeting_intro", esc(mi), "meetings page")
+        else: fb.append("meeting_intro")                       # nothing sourced: the intro is left out, not faked
     if not cfg.get("dining_intro"):
         lead = (f.get("outlets", "").capitalize() + (": " if names else ".")) if f.get("outlets") else ("Dining at the hotel: " if names else "")
         body = (", ".join(names[:-1]) + " and " + names[-1] + ".") if len(names) > 1 else (names[0] + "." if names else stmt(page_text(sc, cfg, r"dining|restaurant"), r"restaurant|bar|cuisine", 2))
         di = (lead + body).strip()
-        if not di: fb.append("dining_intro")
-        put("dining_intro", esc(di or "Ask us about dining options for your group."), "dining page")
+        if di: put("dining_intro", esc(di), "dining page")
+        else: fb.append("dining_intro")
     if not cfg.get("av_support"):
-        if not av: fb.append("av_support")
-        put("av_support", esc(av or "Ask our events team about audio-visual requirements."), "meetings page")
+        if av: put("av_support", esc(av), "meetings page")
+        else: fb.append("av_support")
     if not cfg.get("location_cards"):
         ci = " / ".join(x for x in [("Check-in from " + f["checkin"]) if f.get("checkin") else "", ("check-out until " + f["checkout"]) if f.get("checkout") else ""] if x)
+        getting = " ".join(x for x in [air, pickup if pickup not in air else ""] if x) or html.unescape(cfg.get("address", ""))
+        cards = [{"icon": "location", "title": "Getting Here", "body": esc(getting)}] if getting else []
+        if park or ev: cards.append({"icon": "parking", "title": "Parking" + (" &amp; EV Charging" if ev else ""), "body": esc(" ".join(x for x in [park, ev] if x))})
+        if ci: cards.append({"icon": "report", "title": "Check-in / Check-out", "body": esc(ci + ".")})
+        if near: cards.append({"icon": "star", "title": "Nearby", "body": esc(near)})
         fb += [x for x, missing in (("location_cards.parking", not (park or ev)), ("location_cards.checkin", not ci), ("location_cards.nearby", not near)) if missing]
-        put("location_cards", [{"icon": "location", "title": "Getting Here", "body": esc(" ".join(x for x in [air, pickup if pickup not in air else ""] if x) or html.unescape(cfg.get("address", "")))},
-                               {"icon": "parking", "title": "Parking" + (" &amp; EV Charging" if ev else ""), "body": esc(" ".join(x for x in [park, ev] if x) or "Ask the hotel about parking options.")},
-                               {"icon": "report", "title": "Check-in / Check-out", "body": esc(ci + "." if ci else "See hotel policies.")},
-                               {"icon": "star", "title": "Nearby", "body": esc(near or "Ask us about nearby attractions.")}], "FAQ + page text")
+        if cards: put("location_cards", cards, "FAQ + page text")
     if not cfg.get("amenities_line"):
-        if not amen: fb.append("amenities_line")
-        put("amenities_line", esc(" · ".join(amen) if amen else "Ask us about onsite amenities."), "page text + FAQ")
+        if amen: put("amenities_line", esc(" · ".join(amen)), "page text + FAQ")
+        else: fb.append("amenities_line")
     # ---- optional AI polish (OpenAI-compatible endpoint, e.g. a local Ollama). Rejected unless fully grounded ----
     polished = {}
     if os.environ.get("LLM_BASE_URL"):
@@ -400,7 +409,7 @@ def stage_copy(d):
     for k, v in out.items():
         bad = ungrounded(json.dumps(v, ensure_ascii=False) if not isinstance(v, str) else v, corpus)
         if bad: problems[k] = bad
-    jwrite(f"{d}/copy.json", {"fields": out, "sources": sources, "ai_polished": sorted(polished), "ungrounded": problems, "fallbacks": sorted(fb)})
+    jwrite(f"{d}/copy.json", {"fields": out, "sources": sources, "ai_polished": sorted(polished), "ungrounded": problems, "left_out": sorted(fb)})
     log(f"✔ copy: filled {sorted(out)}" + (f"; AI-polished {sorted(polished)}" if polished else "") + (f"; ⚠ ungrounded {problems}" if problems else "; all grounded in the hotel's text"))
 
 def llm_rewrite(src, corpus):
@@ -431,9 +440,18 @@ def to_cvent(tpl):
         if "&" in em: s = s.replace(em.replace("&", "&amp;"), cv)
     return json.loads(s)
 
-def merged_config(d, prune=True):
-    """The hotel config the builder renders: scrape -> grounded copy -> the hotel's customization branding -> a reviewer's overrides.
-    Photos the assets stage found unusable are dropped (when it has run), and emphasised rooms are listed first."""
+def need(d, name):
+    """A required artifact of an earlier stage. Jobs from before the current pipeline lack some: say so, instead of crashing."""
+    v = jread(f"{d}/{name}")
+    if v is None: fail(f"{name} is missing: this job was started by an older version of the agent. Apply an edit (an empty one, {{}}, is enough) to rebuild it with the current checks.", code="STALE_JOB", category="INVALID_INPUT")
+    return v
+
+
+def merged_config(d, prune=True, emphasis=True, branding=None):
+    """The hotel config the builder renders: scrape -> grounded copy -> branding -> a reviewer's overrides.
+    Photos the assets stage found unusable are dropped (when it has run), and emphasised rooms are listed first.
+    The profile asks for the plain hotel instead (prune=False, emphasis=False, branding=<the hotel's saved branding>), so a one-off choice
+    or a re-run can never change what is stored about the hotel."""
     cfg = jread(f"{d}/config.json"); cp = (jread(f"{d}/copy.json") or {}).get("fields", {}); ov = jread(f"{d}/overrides.json", {}) or {}
     ov = {k: v for k, v in ov.items() if k != "customization"}    # customization changes are read by the profile stage, not merged into the hotel's facts
     custom = (jread(f"{d}/customization.json") or {}).get("customization", {})
@@ -442,12 +460,12 @@ def merged_config(d, prune=True):
             if isinstance(v, dict) and isinstance(base.get(k), dict) and not k.startswith("_"): merge(base[k], v)
             else: base[k] = v
         return base
-    raw = merge(CU.apply_branding(merge(_copy.deepcopy(cfg), cp), custom.get("branding")), ov)
+    raw = merge(CU.apply_branding(merge(_copy.deepcopy(cfg), cp), custom.get("branding") if branding is None else branding), ov)
     h = {k: v for k, v in raw.items() if not k.startswith("_")}
     doc = jread(f"{d}/assets.json")
     if prune and doc: h, _ = AS.prune_media(h, doc.get("records", {}), doc.get("policy", "off"))
     plan = jread(f"{d}/plan.json")
-    if plan: h = CU.apply_emphasis(h, plan["flags"].get("emphasize_rooms"))
+    if plan and emphasis: h = CU.apply_emphasis(h, plan["flags"].get("emphasize_rooms"))
     return h, cfg
 
 
@@ -468,9 +486,17 @@ def stage_profile(d):
     if errs: fail("invalid customization: " + "; ".join(errs), code="CUSTOMIZATION_INVALID", category="INVALID_INPUT", details={"errors": errs})
     jwrite(f"{d}/customization.json", {"hotel_id": hid, "customization": custom, "version": ver,
                                        "layers": {"hotel_saved": bool(saved), "request": bool(inp.get("customization")), "reviewer": bool(ov.get("customization"))}})
-    h, cfg = merged_config(d)
-    profile = HP.build_profile(hotel=ident, inp=inp, h=h, cfg=cfg, facts=facts, cp=cp, ov=ov, custom=custom, scrape=sc, plan_branding=custom.get("branding"))
+    h, cfg = merged_config(d, prune=False, emphasis=False, branding=saved.get("branding") or {})
+    bad_colours = [f"brand.{k}" for k in ("primary", "dark", "tint", "accent", "text") if (h.get("brand") or {}).get(k) is not None and not re.fullmatch(r"#[0-9A-Fa-f]{6}", str((h.get("brand") or {})[k]))]
+    if bad_colours: fail(f"{', '.join(bad_colours)} must be a #RRGGBB colour", code="BAD_BRAND_COLOUR", category="INVALID_INPUT", missing_fields=bad_colours)
+    profile = HP.build_profile(hotel=ident, inp=inp, h=h, cfg=cfg, facts=facts, cp=cp, ov=ov, custom=saved, scrape=sc, plan_branding=saved.get("branding"))
     pv = HP.validate_profile(profile, allow_http=os.environ.get("ALLOW_HTTP") == "1")
+    if pv["critical"]:                      # an invalid profile is shown to the reviewer in this job, but never becomes the hotel's stored profile
+        jwrite(f"{d}/profile.json", {**profile, "profile_status": "rejected", "profile_version": None, "validation": {"levels": pv["levels"], "ok": False}}); jwrite(f"{d}/profile_validation.json", pv)
+        audit(d, "profile_rejected", hotel_id=hid, validation=pv["levels"], codes=[x["code"] for x in pv["critical"]])
+        for w in pv["warnings"]: log(f"  ⚠ [L{w['level']}] {w['message']}")
+        fail("hotel profile is not valid: " + "; ".join(x["message"] for x in pv["critical"]), code="PROFILE_INVALID", category=pv["critical"][0]["category"],
+             missing_fields=[f for x in pv["critical"] for f in x["fields"]], details={"critical": pv["critical"]})
     before = store.index(hid)["latest_version"]
     stored = store.save(profile)
     new = stored["profile_version"] != before
@@ -480,16 +506,13 @@ def stage_profile(d):
     for e in stored["evidence"]: prov[e["provenance"]] = prov.get(e["provenance"], 0) + 1
     log(f"✔ profile: {hid} v{stored['profile_version']} ({'new version' if new else 'unchanged'}, {stored['profile_status']}) | validation L1 {pv['levels']['1']} L2 {pv['levels']['2']} L3 {pv['levels']['3']} | evidence {prov} | customization {ver}")
     for w in pv["warnings"]: log(f"  ⚠ [L{w['level']}] {w['message']}")
-    if pv["critical"]:
-        fail("hotel profile is not valid: " + "; ".join(x["message"] for x in pv["critical"]), code="PROFILE_INVALID", category=pv["critical"][0]["category"],
-             missing_fields=[f for x in pv["critical"] for f in x["fields"]], details={"critical": pv["critical"]})
 
 
 # ---------------------------------------------------------------------------------------------- plan (template family + sections)
 def stage_plan(d):
-    custom_doc, profile = jread(f"{d}/customization.json"), jread(f"{d}/profile.json")
+    custom_doc, profile = need(d, "customization.json"), need(d, "profile.json")
     h, _ = merged_config(d, prune=False); cp = jread(f"{d}/copy.json", {}) or {}; ov = jread(f"{d}/overrides.json", {}) or {}
-    cp = {**cp, "fallbacks": [f for f in cp.get("fallbacks", []) if f.split(".")[0] not in ov]}      # text a person supplied is no longer a placeholder
+    cp = {**cp, "left_out": [f for f in cp.get("left_out", []) if f.split(".")[0] not in ov]}      # text a person supplied is no longer missing
     plan = CU.make_plan(profile, h, cp, custom_doc["customization"], custom_doc["version"])
     jwrite(f"{d}/plan.json", plan)
     audit(d, "plan_made", template_family=plan["template_family"], sections=[s["key"] for s in plan["sections"]], omitted=[o["key"] for o in plan["omitted"]], customization_version=plan["customization_version"])
@@ -517,8 +540,9 @@ def stage_assets(d):
     recs = AS.check_assets(photo_urls + logo_urls, referer=(sc or {}).get("url"), cache=cache, ttl_hours=float(os.environ.get("ASSET_CACHE_HOURS", "24") or 24))
     AS.save_cache(cpath, cache, recs)
     photos = [recs[u] for u in photo_urls]; ok = [r for r in photos if r["ok"]]
-    h2, notes = AS.prune_media(h, recs, pol)
-    jwrite(f"{d}/assets.json", {"policy": pol, "checked_at": now_iso(), "records": recs, "notes": notes, "photos": len(photo_urls), "usable": len(h2.get("media", {}))})
+    changes = []
+    h2, notes = AS.prune_media(h, recs, pol, changes)
+    jwrite(f"{d}/assets.json", {"policy": pol, "checked_at": now_iso(), "records": recs, "notes": notes, "changes": changes, "photos": len(photo_urls), "usable": len(h2.get("media", {}))})
     audit(d, "assets_checked", policy=pol, photos=len(photo_urls), verified=len(ok), cached=sum(1 for r in recs.values() if r.get("cached")), notes=len(notes))
     log(f"✔ assets: {len(ok)}/{len(photos)} photos verified ({sum(1 for r in recs.values() if r.get('cached'))} from cache), {len(logo_urls)} logo URL(s) checked | policy {pol}")
     for n in notes: log("  ⚠ " + n)
@@ -533,7 +557,7 @@ def stage_assets(d):
 
 # ---------------------------------------------------------------------------------------------- build
 def stage_build(d):
-    inp = jread(f"{d}/input.json"); h, cfg = merged_config(d); plan = jread(f"{d}/plan.json")
+    inp = jread(f"{d}/input.json"); plan = need(d, "plan.json"); h, cfg = merged_config(d)
     sections = [s["key"] for s in plan["sections"]]
     missing = [k for k in B.required_for(sections) if not h.get(k)]
     if missing: fail(f"config still missing {missing}: add them via POST /deal-rooms/:id/overrides", code="CONFIG_MISSING_FIELDS", category="REQUIRED_INFO_MISSING", missing_fields=missing)
@@ -564,8 +588,8 @@ def stage_build(d):
 
 # ---------------------------------------------------------------------------------------------- map (merge-field mapping report)
 def stage_map(d):
-    inp, plan, profile = jread(f"{d}/input.json"), jread(f"{d}/plan.json"), jread(f"{d}/profile.json")
-    tpl, binds, h = jread(f"{d}/template.json"), jread(f"{d}/bindings.json", []), merged_config(d)[0]
+    inp, plan, profile = jread(f"{d}/input.json"), need(d, "plan.json"), need(d, "profile.json")
+    tpl, binds, h = need(d, "template.json"), jread(f"{d}/bindings.json", []), merged_config(d)[0]
     doc = jread(f"{d}/assets.json") or {}
     m = MP.build_mapping(h, plan, profile, tpl, inp["flow"], binds, doc.get("records") if doc.get("policy") == "enforce" else None)
     jwrite(f"{d}/mapping.json", m); s = m["summary"]
@@ -578,11 +602,13 @@ def stage_map(d):
 
 # ---------------------------------------------------------------------------------------------- qa (PASS / REVIEW / FAIL)
 def stage_qa(d):
-    inp, plan, profile, pv = jread(f"{d}/input.json"), jread(f"{d}/plan.json"), jread(f"{d}/profile.json"), jread(f"{d}/profile_validation.json", {})
-    tpl, m, h = jread(f"{d}/template.json"), jread(f"{d}/mapping.json"), merged_config(d)[0]
+    inp, plan, profile, pv = jread(f"{d}/input.json"), need(d, "plan.json"), need(d, "profile.json"), jread(f"{d}/profile_validation.json", {})
+    tpl, m, h = need(d, "template.json"), need(d, "mapping.json"), merged_config(d)[0]
     doc = jread(f"{d}/assets.json") or {}
     others = HP.Store(hotels_dir(d)).others(profile["hotel_id"])
-    res = QA.run(tpl=tpl, h=h, plan=plan, profile=profile, pvalid=pv, mapping=m, assets=doc.get("records", {}), others=others, flow=inp["flow"], rights=QA.rights_policy(), check=doc.get("policy", AS.policy()))
+    custom = (jread(f"{d}/customization.json") or {}).get("customization", {})
+    res = QA.run(tpl=tpl, h=h, plan=plan, profile=profile, pvalid=pv, mapping=m, assets=doc.get("records", {}), others=others, flow=inp["flow"], rights=QA.rights_policy(), check=doc.get("policy", AS.policy()),
+                 rights_approved=bool((custom.get("asset_rights") or {}).get("approved")), asset_changes=doc.get("changes", []))
     jwrite(f"{d}/qa.json", res)
     audit(d, "qa_outcome", outcome=res["outcome"], counts=res["counts"], critical=[x["code"] for x in res["critical"]], review=[x["code"] for x in res["review"]])
     log(f"✔ qa: {res['outcome']} | {res['counts']['pass']} passed, {res['counts']['review']} need review, {res['counts']['fail']} failed" if res["outcome"] != "FAIL" else f"✖ qa: FAIL | {res['counts']}")
@@ -602,7 +628,7 @@ HIGH = [(r"no logo", "ASSET_MISSING"), (r"address not found", "REQUIRED_INFO_MIS
 def stage_review(d):
     inp, rep, tpl = jread(f"{d}/input.json"), jread(f"{d}/report.json"), jread(f"{d}/template.json")
     h, cfg = merged_config(d); facts = jread(f"{d}/facts.json", []); cp = jread(f"{d}/copy.json", {})
-    plan, qa, profile, m = jread(f"{d}/plan.json"), jread(f"{d}/qa.json"), jread(f"{d}/profile.json"), jread(f"{d}/mapping.json")
+    plan, qa, profile, m = need(d, "plan.json"), need(d, "qa.json"), need(d, "profile.json"), need(d, "mapping.json")
     pv = jread(f"{d}/profile_validation.json", {})
     items = []
     def item(code, cat, msg, fields=()): items.append({"code": code, "category": cat, "severity": "high", "message": msg, "fields": list(fields)})
@@ -638,8 +664,10 @@ def stage_review(d):
 def review_html(job_id, inp, rep, tpl, h, facts, cp, high, extra):
     e = html.escape; P = rep["palette"]
     plan, qa, profile, mp, pv = extra["plan"], extra["qa"], extra["profile"], extra["mapping"], extra["pv"]
-    sw = "".join(f'<div class="sw"><span style="background:{v}"></span>{k}<br><code>{v}</code></div>' for k, v in P.items() if isinstance(v, str) and v.startswith("#"))
-    logos = "".join(f'<img src="{e(l.get("url", ""))}" alt="logo" style="max-height:60px;background:#fff;padding:6px;border:1px solid #ddd">' for l in h.get("logos", []))
+    sw = "".join(f'<div class="sw"><span style="background:{e(v)}"></span>{e(k)}<br><code>{e(v)}</code></div>' for k, v in P.items() if isinstance(v, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", v))
+    # logos load through the app's checked image route, not straight from the hotel's server into the reviewer's browser
+    logos = "".join(f'<img src="{e(l["url"]) if str(l.get("url", "")).startswith("data:image/") else "/deal-rooms/" + e(job_id) + "/media/logo_" + str(i)}" alt="logo" style="max-height:60px;background:#fff;padding:6px;border:1px solid #ddd">'
+                    for i, l in enumerate(h.get("logos", []), 1) if l.get("url"))
     slot_of = {}
     for slot, keys in h["slots"].items():
         for k in keys: slot_of.setdefault(k, []).append(slot)
@@ -661,7 +689,8 @@ def review_html(job_id, inp, rep, tpl, h, facts, cp, high, extra):
     pl_dec = "".join(f"<li>{e(x)}</li>" for x in plan["decisions"])
     dyn = "".join(f"<tr><td>{e(k)}</td><td>{v}</td></tr>" for k, v in mp["summary"]["dynamic_by_category"].items())
     stat = "".join(f'<tr class="m-{e(s["validation"])}"><td>{e(s["section"])} / {e(s["slot"])}</td><td>{e(s["provenance"])}</td><td>{s["confidence"]}</td><td>{e(s["validation"])} {e(s["validation_note"])}</td></tr>' for s in mp["static"])
-    return f"""<!doctype html><html><head><meta charset="utf-8"><title>Review: {e(h['name'])}</title>
+    # The page carries its own policy, so no script can run in it however it is opened (the UI opens it from a blob, which would not inherit the sandbox header).
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src * data:; style-src 'unsafe-inline'"><title>Review: {e(h['name'])}</title>
 <style>body{{font:14px/1.5 system-ui,sans-serif;margin:0;background:#f6f6f4;color:#222}}main{{max-width:1100px;margin:auto;padding:24px}}
 section{{background:#fff;border-radius:12px;padding:20px;margin:16px 0;box-shadow:0 1px 3px #0001}}h1{{margin:0}}h2{{margin-top:0}}
 .sw{{display:inline-block;width:120px;font-size:12px;margin:4px}}.sw span{{display:block;height:36px;border-radius:6px;border:1px solid #ccc}}
@@ -690,9 +719,18 @@ Body font: <b>{e(str((h.get('fonts') or {}).get('body', {}).get('site_font')))}<
 
 
 # ---------------------------------------------------------------------------------------------- publish gate
+def record_generation(d):
+    """Note which job produced a deal room from which profile version: only once the page was saved and read back (or handed over as a loader)."""
+    pub, plan, inp, job = jread(f"{d}/publication.json"), jread(f"{d}/plan.json"), jread(f"{d}/input.json"), jread(f"{d}/job.json", {})
+    if not (pub and plan): return
+    HP.Store(hotels_dir(d)).record_generation(pub["hotel_id"], {"job_id": job.get("id"), "at": now_iso(), "profile_version": pub["profile_version"], "customization_version": plan["customization_version"],
+                                                                 "template_family": plan["template_family"], "flow": inp["flow"], "hippo_page_id": inp.get("hippo_page_id") or None,
+                                                                 "opportunity_id": inp.get("opportunity_id") or None, "approved_by": pub["approved_by"], "qa_outcome": pub["qa_outcome"]})
+
+
 def stage_publish_gate(d):
     """The last check before anything is saved to Hippo, and the moment a hotel profile version becomes approved."""
-    job = jread(f"{d}/job.json", {}); plan, qa, profile, pv = jread(f"{d}/plan.json"), jread(f"{d}/qa.json"), jread(f"{d}/profile.json"), jread(f"{d}/profile_validation.json", {})
+    job = jread(f"{d}/job.json", {}); plan, qa, profile, pv = need(d, "plan.json"), need(d, "qa.json"), need(d, "profile.json"), jread(f"{d}/profile_validation.json", {})
     tpl, inp = jread(f"{d}/template.json"), jread(f"{d}/input.json")
     problems = []
     if not qa or qa.get("outcome") == "FAIL": problems.append("QA has not passed")
@@ -703,8 +741,6 @@ def stage_publish_gate(d):
     approver = next((ev.get("by") or "auto" for ev in reversed(job.get("history", [])) if str(ev.get("event", "")).startswith(("approved", "auto-approved"))), "unknown")
     store = HP.Store(hotels_dir(d)); hid, ver = profile["hotel_id"], profile["profile_version"]
     store.approve(hid, ver, approver)
-    store.record_generation(hid, {"job_id": job.get("id"), "at": now_iso(), "profile_version": ver, "customization_version": plan["customization_version"], "template_family": plan["template_family"],
-                                  "flow": inp["flow"], "hippo_page_id": inp.get("hippo_page_id") or None, "opportunity_id": inp.get("opportunity_id") or None, "approved_by": approver, "qa_outcome": qa["outcome"]})
     rights = "approved" if all(a.get("usage_rights_status") == "approved" for a in profile.get("assets", [])) else f"unverified: accepted for this deal room by {approver} at approval"
     jwrite(f"{d}/publication.json", {"hotel_id": hid, "profile_version": ver, "approved_by": approver, "approved_at": now_iso(), "qa_outcome": qa["outcome"], "template_family": plan["template_family"], "asset_rights": rights})
     audit(d, "publication_gate_passed", hotel_id=hid, profile_version=ver, approved_by=approver)
@@ -722,14 +758,16 @@ class Hippo:
             self.h["Cookie"] = os.environ["HIPPO_COOKIE"]
             if os.environ.get("HIPPO_CSRF"): self.h["X-CSRF-Token"] = os.environ["HIPPO_CSRF"]
         else: fail("load=api needs HIPPO_API_TOKEN (or HIPPO_COOKIE + HIPPO_CSRF) in the environment", code="HIPPO_NOT_CONFIGURED")
+        if not self.base.startswith("https://") and os.environ.get("ALLOW_HTTP") != "1": fail("HIPPO_BASE_URL must be https:// (the token or cookie would travel in clear)", code="HIPPO_NOT_CONFIGURED")
     def _req(self, method, path, data=None, ctype=None):
         hd = dict(self.h)
         if ctype: hd["Content-Type"] = ctype
         req = urllib.request.Request(self.base + path, data=data, method=method, headers=hd)
         try:
-            with urllib.request.urlopen(req, timeout=60) as r: return r.status, r.read().decode()
+            with netsafe._opener.open(req, timeout=60) as r: return r.status, r.read().decode()
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")[:300]; ra = e.headers.get("Retry-After", "")
+            if 300 <= e.code < 400: fail(f"Hippo redirected the request (HTTP {e.code}): the session or token is probably not valid; the credentials were not sent anywhere else", code="HIPPO_AUTH")
             if e.code in (429, 500, 502, 503, 504): fail(f"Hippo returned HTTP {e.code}: {body}", code="HIPPO_TRANSIENT", retryable=True, retry_after=int(ra) if ra.isdigit() else None)
             if e.code in (401, 403): fail(f"Hippo rejected the credentials (HTTP {e.code}): the token or session cookie is missing, expired or not allowed to edit this page", code="HIPPO_AUTH")
             if e.code == 404: fail("Hippo has no such deal room page (HTTP 404): check hippo_page_id", code="HIPPO_PAGE_NOT_FOUND")
@@ -756,6 +794,7 @@ def stage_load(d):
         jwrite(f"{d}/load.json", {"mode": "manual", "status": "ready", "how": "Paste loader.js in the browser Console / a DevTools Snippet on deal-room/edit/<page>"})
         log("✔ load: manual mode, loader.js is ready (backup + confirm + __hvRestore built in)"); return
     hp, pid = Hippo(), inp["hippo_page_id"]
+    if os.path.exists(f"{d}/rollback.json"): os.remove(f"{d}/rollback.json")
     cur = hp.get_template(pid)
     if os.path.exists(f"{d}/backup.json"):            # keep the page as it was before this job first touched it
         os.makedirs(f"{d}/backups", exist_ok=True); jwrite(f"{d}/backups/backup-{int(time.time())}.json", cur)
@@ -778,7 +817,7 @@ def tokens(obj): return sorted(set(re.findall(r"\$\{[^}]*\}", html.unescape(json
 def stage_verify(d):
     inp = jread(f"{d}/input.json"); tpl = jread(f"{d}/template.json")
     if inp["load"] != "api":
-        jwrite(f"{d}/verify.json", {"status": "skipped", "reason": "manual load: verify after pasting the loader by re-running with load=api, or check the page"}); log("✔ verify: skipped (manual load)"); return
+        jwrite(f"{d}/verify.json", {"status": "skipped", "reason": "manual load: verify after pasting the loader by re-running with load=api, or check the page"}); record_generation(d); log("✔ verify: skipped (manual load)"); return
     hp, pid = Hippo(), inp["hippo_page_id"]
     got = hp.get_template(pid)["template"]
     crit, notes = [], []
@@ -801,6 +840,7 @@ def stage_verify(d):
     if crit and os.environ.get("AUTO_ROLLBACK", "1") == "1":
         log("✖ verify failed: " + "; ".join(crit)); stage_rollback(d); fail("verify failed, page rolled back to the backup", code="VERIFY_FAILED", details={"critical": crit})
     if crit: fail("verify failed: " + "; ".join(crit), code="VERIFY_FAILED", details={"critical": crit})
+    record_generation(d)
     log(f"✔ verify: page matches ({len(tw)} merge fields, {len(want_s)} sections)" + (f" | notes: {notes}" if notes else ""))
 
 def stage_rollback(d):

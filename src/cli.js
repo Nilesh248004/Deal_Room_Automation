@@ -88,7 +88,7 @@ function summary(j) {
     if (created.deduplicated) console.log(`↺ an identical request already has job ${created.job.id} (${created.job.status}); not starting a duplicate (use --force to run again)`);
     else console.log(`▶ job ${created.job.id}`);
     let j = created.deduplicated ? created.job : await follow(created.job.id);
-    if (j.status === "awaiting_approval" && flags.approve) { console.log("\n▶ approved from the command line (--approve)"); jobs.approve(j.id, "cli"); j = await follow(j.id); }
+    if (j.status === "awaiting_approval" && flags.approve) { console.log("\n▶ approved from the command line (--approve)"); jobs.approve(j.id, who); j = await follow(j.id); }
     process.exit(summary(j));
   }
   if (["approve", "rollback", "overrides", "retry"].includes(cmd)) {

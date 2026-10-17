@@ -405,7 +405,8 @@ def build_full(h, plan=None):
     if want("gallery"):
         gal = ([dyn_named("Virtual Tour Video", "video", "virtual_tour_video")] if video_slot else []) + \
               ([image_asset(k, f"Property Image {i}") for i, k in enumerate(h["slots"]["gallery"], 1)] if gal_images else [])
-        bind("gallery", "photo carousel", "slots.gallery"); bind("gallery", "featured video", "featured_video", required=False)
+        if gal_images: bind("gallery", "photo carousel", "slots.gallery")
+        bind("gallery", "featured video", "featured_video", required=False)
         section("gallery", "Virtual Tour &amp; Gallery", [heading("Virtual Tour &amp; Gallery", "A walkthrough of the venue and property.")]
                 + (featured_video() if featured else []) + [carousel(gal, cid="Carousel_GcPXYVuF")])
     # ===== 13 Proposal PDF =====
@@ -495,13 +496,17 @@ def validate(tpl, h, checks):
 
 def make_loader(tpl, page_id, label, flow="Email"):
     s = json.dumps(tpl, ensure_ascii=False, separators=(',', ':'))
-    return r'''// Hippo deal room loader: %(label)s (%(flow)s flow) -> page %(pid)s
+    # The hotel's name is untrusted text from its website. It is never pasted into JavaScript source: it goes in once, as a JSON string
+    # literal (non-ASCII escaped, so U+2028/2029 can't end the line), and the code refers to LABEL. The comment gets a one-line, ASCII-safe copy.
+    comment = re.sub(r"[^\x20-\x7e]", "?", label)[:120]
+    return r'''// Hippo deal room loader: %(comment)s (%(flow)s flow) -> page %(pid_comment)s
 // Run in the browser Console while logged in on https://www.hippovideo.io/deal-room/edit/<page id>
 (async () => {
-  console.log("▶ Deal room loader started: %(label)s");
+  const LABEL = %(label)s;
+  console.log("▶ Deal room loader started: " + LABEL);
   if (location.hostname !== "www.hippovideo.io") { console.error("✖ Open the Hippo deal room editor tab first, then run this again."); return; }
   const m = location.pathname.match(/\/deal-room\/edit\/(\d+)/);
-  const FIXED = "%(pid)s";
+  const FIXED = %(pid)s;
   if (!m) { console.error("✖ Open the deal room EDITOR tab (https://www.hippovideo.io/deal-room/edit/<id>), then run this again."); return; }
   const PAGE_ID = FIXED !== "auto" ? FIXED : m[1];
   if (m && m[1] !== PAGE_ID) { console.error("✖ This tab is page " + m[1] + " but the loader targets page " + PAGE_ID + ". Stopping."); return; }
@@ -517,7 +522,7 @@ def make_loader(tpl, page_id, label, flow="Email"):
   a.href = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
   a.download = "deal-room-" + PAGE_ID + "-backup-" + Date.now() + ".json"; a.click();
   console.log("✔ Backup saved for page " + PAGE_ID + " (" + backup.template.sections.length + " sections).");
-  if (!confirm('Replace "' + (backup.page_name || "page " + PAGE_ID) + '" (page ' + PAGE_ID + ", " + backup.template.sections.length + " sections) with the %(label)s deal room?\n\nA backup file has just been downloaded.")) { console.warn("Cancelled. Nothing was changed."); return; }
+  if (!confirm('Replace "' + (backup.page_name || "page " + PAGE_ID) + '" (page ' + PAGE_ID + ", " + backup.template.sections.length + " sections) with the " + LABEL + " deal room?\n\nA backup file has just been downloaded.")) { console.warn("Cancelled. Nothing was changed."); return; }
   window.__hvRestore = async () => {
     const t = window.__hvBackup.template, keep = {};
     ["multiple_logo_top","sections","sideNav","header_cta_buttons","settings","contactInfo"].forEach(k => { if (k in t) keep[k] = t[k]; });
@@ -538,10 +543,10 @@ def make_loader(tpl, page_id, label, flow="Email"):
     body: new URLSearchParams({ template: JSON.stringify(TEMPLATE), page_id: PAGE_ID }) });
   const txt = await res.text();
   console.log("Save:", res.status, txt);
-  if (res.ok && /"success":\s*true/.test(txt)) console.log("✔ Done. Reload the editor to see the %(label)s deal room. If anything is off, run __hvRestore()");
+  if (res.ok && /"success":\s*true/.test(txt)) console.log("✔ Done. Reload the editor to see the " + LABEL + " deal room. If anything is off, run __hvRestore()");
   else console.error("✖ Save did not succeed. Nothing else was changed. Send this output to Claude.");
 })();
-''' % {"pid": page_id, "tpl": s, "label": label, "flow": flow}
+''' % {"pid": json.dumps(str(page_id)), "pid_comment": re.sub(r"[^A-Za-z0-9_-]", "?", str(page_id))[:20], "tpl": s, "label": json.dumps(label), "comment": comment, "flow": re.sub(r"[^A-Za-z]", "", flow)}
 
 
 if __name__ == "__main__":

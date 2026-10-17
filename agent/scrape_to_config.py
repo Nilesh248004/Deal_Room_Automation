@@ -341,7 +341,7 @@ def convert(sc):
             if k not in styles: styles.append(k)
     order = ["Theatre", "Classroom", "U Shaped", "Boardroom", "Circular", "Reception"]
     styles = sorted(styles, key=lambda s: order.index(s) if s in order else 99)
-    venue_rows = [[html.escape(v["title"]), html.escape(size_of(v["specs"]))] + [v["seating"].get(s, "—") for s in styles]
+    venue_rows = [[html.escape(v["title"]), html.escape(size_of(v["specs"]))] + [html.escape(v["seating"].get(s, "—")) for s in styles]
                   for v in sorted(venues_raw, key=lambda v: -int(re.sub(r"\D", "", max(v["seating"].values(), key=lambda x: int(re.sub(r'\D', '', x) or 0)) if v["seating"] else "0") or 0))]
     room_rows = [[html.escape(r["title"]), html.escape(size_of(r["specs"])), html.escape(guests_of(r["specs"], {}))] for r in rooms_raw]
     if not venue_rows: warnings.append("no venue capacities found: the venue table will be left out")
@@ -376,7 +376,7 @@ def convert(sc):
         "rooms_intro": html.escape(((rooms_line.group(0) + ". ") if rooms_line else "") + find(room_txt, r"room|suite[^.]*\.", 1)).strip(),
         "room_types": {"columns": ["Room type", "Size", "Guests"], "rows": room_rows} if room_rows else None,
         "meeting_intro": "",
-        "venues": {"note": "Capacities as published by the hotel; confirm setups with the hotel.", "columns": ["Venue", "Area"] + styles, "rows": venue_rows},
+        "venues": {"note": "Capacities as published by the hotel; confirm setups with the hotel.", "columns": ["Venue", "Area"] + [html.escape(s) for s in styles], "rows": venue_rows},
         "dining_title": "Restaurants &amp; Bars",
         "dining_intro": "",
         "av_support": "",

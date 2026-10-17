@@ -46,7 +46,7 @@ node src/cli.js run --url "https://www.tajhotels.com/en-in/hotels/jai-mahal-pala
 | capture | scrape.json, capture/page.png | `robots.txt` disallows the page (`ROBOTS_POLICY`), the site redirects to a different host, the page refuses automated access (401/403: never bypassed), or returns an error. Network failures, 429 and 5xx are retried with backoff first. Headless Chromium accepts the cookie banner, scrolls the whole page and runs `agent/scrape_hotel.js` (the same scraper as the browser snippet). Its own requests to private networks, and to pages `robots.txt` disallows, are blocked. |
 | convert | config.json | No usable hotel photos are found. It works out colours by role, font stacks, the header and parent-brand logos, classified photos, and venue and room tables. Only the hotel's own pages are used, not chain-wide ones. |
 | facts | facts.json | Never. Each fact is saved with the page it came from and the quote it was taken from. Facts without a source are flagged for review. |
-| copy | copy.json | Never. Copy is built only from facts, FAQ answers in structured data and page sentences. The optional AI rewrite is rejected if it adds any number or name that isn't in the hotel's text. Fields that fell back to generic wording are listed in `fallbacks`. |
+| copy | copy.json | Never. Copy is built only from facts, FAQ answers in structured data and page sentences. The optional AI rewrite is rejected if it adds any number or name that isn't in the hotel's text. A block with nothing sourced behind it (a dining intro, parking, nearby) is **left out and listed in `left_out`**, never filled with filler wording. |
 | profile | customization.json, profile.json, profile_validation.json | A required field (name, official URL, address, city) is missing, or the captured page is from a different host than `hotel_url`. Saves the hotel profile as a **new version only if its content changed**. |
 | plan | plan.json | The customization asks for something this hotel's data can't support (for example the meeting-space family with no published venue capacities), or a section can't be populated and `on_unavailable` is `block`. |
 | assets | assets.json | Every photo is fetched once and checked (reachable, really an image, size, dimensions, sha256). Unusable and duplicate photos are dropped. Stops only when **no** photo can be verified. |
@@ -94,7 +94,7 @@ Make a customization the hotel's default with `PUT /hotels/:id/customization`, o
 | `inferred` | Generated wording (rules or AI). Passed the grounding check but is **never presented as a verified fact** |
 | `manually_corrected` | A reviewer's override |
 
-Approval is separate: nothing is "approved for proposal use" until a person approves the job (or `mode=auto` is authorised for the hotel). Re-running an unchanged hotel keeps its version; changed content makes a new one. `GET /hotels/:id` shows `regeneration_required` when a deal room was generated from an older version than the one now approved. It never regenerates by itself.
+Approval is separate: nothing is "approved for proposal use" until a person approves the job (or `mode=auto` is authorised for the hotel). The profile holds the hotel's own data: the scrape, generated copy, a reviewer's corrections and the hotel's **saved** customization. A one-off per-request choice (branding, asset rights) is applied to that deal room only and never changes the stored profile. A table row a reviewer added or changed is `manually_corrected` with no page behind it. A rejected profile (for example a scrape from another host) is shown in its job but never stored. Re-running an unchanged hotel keeps its version; changed content makes a new one, and approving an older version never un-approves a newer one. A generation is recorded only after the page was saved and read back (or handed over as a loader). `GET /hotels/:id` shows `regeneration_required` when a deal room was generated from an older version than the one now approved. It never regenerates by itself.
 
 Validation has three levels (structure, plausibility, source). A required field never passes just because it isn't empty: a capture from another host than `hotel_url` is critical, an unconfirmed official source and low-confidence required fields need a person.
 
@@ -102,8 +102,8 @@ Validation has three levels (structure, plausibility, source). A required field 
 
 `qa.json` ends in **PASS**, **REVIEW** (a person must decide; `mode=auto` stops) or **FAIL** (publication blocked, job fails with an exception).
 
-* FAIL: critical profile errors, mapping errors, template not matching the plan, a malformed or unknown merge field, a blank block, an image in the deal room that wasn't verified, an unsafe link (only `https:`, `mailto:` and merge-field links pass), a CTA that doesn't go where the plan says, another hotel's name in the text.
-* REVIEW: unconfirmed official source, low-confidence required field, conflicting or implausible values, unmet customization requests, **prices in hotel-owned text** (rates come from an approved opportunity, never from the hotel's page), unverified brand-asset rights, wide tables.
+* FAIL: critical profile errors, mapping errors, template not matching the plan, a malformed or unknown merge field, a blank block, an image in the deal room that wasn't verified, an unsafe link (only `https:`, `mailto:` and merge-field links pass), script, frame or event-handler markup in any text, a CTA that doesn't go where the plan says, another hotel's name in the text.
+* REVIEW: unconfirmed official source, low-confidence required field, conflicting or implausible values, unmet customization requests (including a focus the hotel's data can't support), **prices in hotel-owned text** in any common form (`€250`, `INR 8,000 a night`, `Rs. 5,000`; rates come from an approved opportunity, never from the hotel's page), unverified brand-asset rights, a photo swapped in for a missing one or dropped over a temporary error, wide tables.
 * **Not checked, and reported as such:** how Hippo renders the saved page on a phone and a desktop, PDF export and share links. The agent has no Hippo preview URL or export API to open.
 
 Hotel facts are written into the template; event and commercial values (`${Guest Room Rate}`, `${Event Dates}` …) stay Hippo merge fields that Hippo fills per opportunity. `mapping.json` lists every one, classified as commercial / event / contact / proposal, with who supplies it.
@@ -213,12 +213,22 @@ The end-to-end tests cover the following:
 ## Safety design
 
 - Merge fields, colours, IDs and the save format come from code (`agent/dealroom_builder.py`, `agent/hippo_fields.py`). AI never places them. Free-text notes never change a plan.
-- Every outbound request the pipeline makes itself (robots.txt, photo checks) validates the URL and every redirect hop and refuses private and reserved addresses; Chromium's requests are filtered the same way. Redirects to another host fail the job.
+- Every outbound request the pipeline makes itself (robots.txt, photo checks) validates the URL and every redirect hop, refuses private and reserved addresses, and has a total deadline. Chromium's requests are **filtered** the same way (public hosts only, http(s) on standard ports, an unresolvable name is refused, service workers blocked), but Chromium resolves names itself, so this is a filter and not a guarantee against a hostile DNS server: **also deny private ranges at the network edge** (container egress policy) in production. Redirects to another host fail the job.
 - Python stages are started with an argument list, never through a shell. They only receive the environment variables they need, and this server's API keys are never passed on.
-- Only allowlisted files can be downloaded. Job IDs and hotel IDs are checked against a strict pattern. `review.html` is served with a sandboxing Content Security Policy.
+- Only allowlisted files can be downloaded. Job IDs and hotel IDs are checked against a strict pattern. `review.html` is served with a sandboxing Content Security Policy and carries its own no-script policy.
+- A hotel's name or any other text from its website is never pasted into code: `loader.js` carries it as one escaped data literal, venue-table cells and the review page are HTML-escaped, and QA fails any raw script, frame, event-handler or `javascript:` markup. A brand colour that isn't `#RRGGBB` is refused.
+- Request bodies drop `__proto__` keys, the merge that applies overrides ignores `__proto__`/`constructor`/`prototype`, and a malformed request target gets a 400 instead of taking the process down.
+- Each stage gets only the credentials it needs (the browser that opens hotel pages never sees the Hippo token). The server refuses to start with a short or placeholder API key.
 - Nothing is sent to Hippo before approval, or before the high-severity gate and QA pass in auto mode. Every save is preceded by a backup and followed by a read-back check.
 - Hotel-owned text can't carry prices, another hotel's name fails QA, and unverified brand-asset rights stop `mode=auto`.
 - Logs and the audit trail hold ids, stage names and outcomes only: no secrets and no recipient details.
+
+## Known limits
+
+* The unauthenticated `GET /deal-rooms/:id/media/:key` route (it lets the sandboxed review page show photos) is protected only by the job id. It serves raster images only, streams with a hard size cap and a locked-down response, but anyone who learns a job id can use it as a limited image fetcher. Put the API behind your network controls.
+* A job left in `awaiting_approval` holds its Hippo page until it is approved or cancelled; there is no timeout.
+* Only the first venue-table layout (Taj/IHCL) is parsed. For chain-wide country paths the scraper's own-pages filter is still the chain's country prefix, although the hotel's **identity** uses its own page.
+* The hotel store uses file locks inside the Python stages; the API writes `customization.json` atomically but without that lock (last writer wins).
 
 ## Not done yet (needs Hippo engineering)
 

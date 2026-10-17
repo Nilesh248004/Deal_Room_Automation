@@ -35,7 +35,7 @@ EVIDENCE = {
     "meeting_intro": ["override.meeting_intro", "copy.meeting_intro", "venues"], "dining_intro": ["override.dining_intro", "copy.dining_intro", "facts.outlets"],
     "av_support": ["override.av_support", "copy.av_support"], "location_intro": ["override.location_intro", "address"],
     "location_cards": ["override.location_cards", "copy.location_cards"], "amenities_line": ["override.amenities_line", "amenities", "copy.amenities_line"],
-    "room_types": ["rooms"], "venues": ["venues"], "map": ["map"], "brand": ["brand.primary"], "fonts": ["font.body"],
+    "room_types": ["override.room_types", "rooms"], "venues": ["override.venues", "venues"], "map": ["map"], "brand": ["brand.primary"], "fonts": ["font.body"],
 }
 
 
@@ -67,7 +67,6 @@ def _kind(v):
 def build_mapping(h, plan, profile, tpl, flow, binds, assets=None):
     ev = {e["field_key"]: e for e in profile.get("evidence", [])}
     asset_by_url = {a.get("source_url"): a for a in profile.get("assets", [])}
-    placeholders = {p.split(".")[0] for p in (plan or {}).get("placeholders", [])}
     errors, warnings, static = [], [], []
     for b in binds:
         key, req = b["config_key"], b["required"]
@@ -92,7 +91,6 @@ def build_mapping(h, plan, profile, tpl, flow, binds, assets=None):
             status, note = "error", "required value is empty"
             errors.append({"code": "REQUIRED_BINDING_EMPTY", "category": "MERGE_FIELD_UNMAPPED", "message": f"{b['section']}/{b['slot']}: required field '{key}' has no value", "fields": [key]})
         elif empty: status, note = "omitted", "no value: the block is left out, nothing is made up"
-        elif key in placeholders: status, note = "warn", "generic placeholder wording: no sourced text was found"
         elif req and conf < 0.6 and prov != "unknown": status, note = "warn", f"low confidence ({conf}): verify before publishing"
         if status == "warn" and "low confidence" in note: warnings.append({"code": "LOW_CONFIDENCE", "category": "UNVERIFIED_CONTENT", "message": f"{b['section']}/{b['slot']}: {note}", "fields": [key], "review": True})
         static.append({"section": b["section"], "slot": b["slot"], "target": key, "source_field": sf,

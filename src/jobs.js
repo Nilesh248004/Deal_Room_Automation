@@ -9,7 +9,7 @@ const { spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const cfg = require("./config");
 const audit = require("./audit");
-const { ExceptionQueue } = require("./exceptions");
+const { ExceptionQueue, UNRESOLVED } = require("./exceptions");
 const { Hotels } = require("./hotels");
 
 const PIPELINE = ["intake", "capture", "convert", "facts", "copy", "profile", "plan", "assets", "build", "map", "qa", "review"];
@@ -17,6 +17,8 @@ const AFTER_APPROVAL = ["publish_gate", "load", "verify"];
 const REBUILD = ["profile", "plan", "assets", "build", "map", "qa", "review"];
 const ACTIVE = new Set(["queued", "running", "awaiting_approval"]);
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "rolled_back"]);
+// Where trying again can help because something outside the data may change (a site comes back, a token is renewed). Bad input and failed checks need an edit instead.
+const RETRYABLE_CATEGORIES = new Set(["SOURCE_UNAVAILABLE", "PUBLISH_FAILURE", "ASSET_MISSING", "INTERNAL_ERROR", "SHARE_LINK_FAILURE", "DELIVERY_FAILURE"]);
 const RETRY_ON_TIMEOUT = new Set(["capture", "assets", "load", "verify", "rollback"]);   // network stages: a timeout may be transient
 const STAGE_CATEGORY = { intake: "INVALID_INPUT", capture: "SOURCE_UNAVAILABLE", assets: "ASSET_MISSING", qa: "RENDER_FAILURE", publish_gate: "PUBLISH_FAILURE", load: "PUBLISH_FAILURE", verify: "PUBLISH_FAILURE", rollback: "PUBLISH_FAILURE" };
 const DELIVERY = { status: "not_configured", detail: "PDF export, share links and email/CRM delivery have no verified Hippo integration yet. The deal room is saved to the Hippo page (or handed over as loader.js); nothing is sent to recipients and no opens or views are tracked." };
@@ -37,6 +39,8 @@ const FLOW = ["email", "cvent"], MODE = ["review", "auto"], LOAD = ["manual", "a
 const TRACKING = /^(utm_|gclid|gbraid|fbclid|cm_mmc|mktgvar|clk_src|partner|trso|srb_|hmguid)/i;
 const err = (message, status, extra = {}) => Object.assign(new Error(message), { status, ...extra });
 const sha = s => crypto.createHash("sha256").update(s).digest("hex");
+const normPage = id => (id === undefined || id === null || id === "" ? "" : String(Number(id)));     // "0123" and "123" are the same Hippo page
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
 
 function validateInput(b) {
   const errs = [];
@@ -60,8 +64,11 @@ function validateInput(b) {
   return errs;
 }
 
-function stageEnv(extra = {}) {
-  const env = {}; for (const k of cfg.stageEnvKeys) if (process.env[k] !== undefined) env[k] = process.env[k];
+// A stage only gets the credentials it needs: the browser that opens hotel pages never sees the Hippo token.
+const SECRET_STAGES = { HIPPO_API_TOKEN: ["load", "verify", "rollback"], HIPPO_COOKIE: ["load", "verify", "rollback"], HIPPO_CSRF: ["load", "verify", "rollback"], LLM_API_KEY: ["copy"] };
+function stageEnv(extra = {}, stage = null) {
+  const env = {};
+  for (const k of cfg.stageEnvKeys) if (process.env[k] !== undefined && (!SECRET_STAGES[k] || (stage && SECRET_STAGES[k].includes(stage)))) env[k] = process.env[k];
   return { ...env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8", ...extra };
 }
 
@@ -89,9 +96,16 @@ function normUrl(u) {
   try { const x = new URL(String(u).trim()); x.hash = ""; for (const k of [...x.searchParams.keys()]) if (TRACKING.test(k)) x.searchParams.delete(k); return x.href; } catch { return String(u).trim(); }
 }
 
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+function normCustom(c) {   // "auto" and null mean "nothing asked": they must not make an otherwise identical request look different
+  if (!c || typeof c !== "object") return null;
+  const out = Object.fromEntries(Object.entries(c).filter(([k, v]) => v !== null && v !== undefined && !(k === "template_family" && v === "auto")));
+  return Object.keys(out).length ? out : null;
+}
 function deepMerge(base, over) {
   for (const [k, v] of Object.entries(over || {})) {
-    if (v && typeof v === "object" && !Array.isArray(v) && base[k] && typeof base[k] === "object" && !Array.isArray(base[k])) deepMerge(base[k], v);
+    if (UNSAFE_KEYS.has(k)) continue;                      // never let a request body reach Object.prototype
+    if (v && typeof v === "object" && !Array.isArray(v) && Object.hasOwn(base, k) && base[k] && typeof base[k] === "object" && !Array.isArray(base[k])) deepMerge(base[k], v);
     else base[k] = v;
   }
   return base;
@@ -137,13 +151,19 @@ class Jobs extends EventEmitter {
     for (const n of fs.readdirSync(this.dir)) { if (!n.startsWith("dr_")) continue; const j = this.get(n); if (j && pred(j)) out.push(j); }
     return out;
   }
-  log(id, text) { fs.appendFileSync(path.join(this.jobDir(id), "run.log"), text); }
+  log(id, text) {
+    const p = path.join(this.jobDir(id), "run.log");
+    let size = 0; try { size = fs.statSync(p).size; } catch {}
+    if (size > MAX_LOG_BYTES) return;                       // a noisy page must not fill the disk
+    const room = MAX_LOG_BYTES - size;
+    fs.appendFileSync(p, text.length > room ? text.slice(0, room) + "\n… log truncated: size limit reached …\n" : text);
+  }
   audit(id, event, by, data = {}) { audit.append(path.join(this.jobDir(id), "audit.jsonl"), { event, by, job_id: id, ...data }); }
   auditLog(id, limit) { this.jobDir(id); return audit.read(path.join(this.jobDir(id), "audit.jsonl"), limit); }
 
   idempotencyKey(b) {
-    return sha(stable({ url: normUrl(b.hotel_url), page: String(b.hippo_page_id || ""), flow: b.flow || "email", mode: b.mode || "review", load: b.load || "manual", opp: b.opportunity_id || "",
-      customization: b.customization || null, save: !!b.save_customization, overrides: b.overrides || null, scrape: b.scrape ? sha(stable(b.scrape)) : null }));
+    return sha(stable({ url: normUrl(b.hotel_url), page: normPage(b.hippo_page_id), flow: b.flow || "email", mode: b.mode || "review", load: b.load || "manual", opp: b.opportunity_id || "",
+      customization: normCustom(b.customization), save: !!b.save_customization, overrides: b.overrides || null, scrape: b.scrape ? sha(stable(b.scrape)) : null }));
   }
 
   // Same request, same result (PDF §10.3): returns the job that already answers it instead of starting a duplicate.
@@ -152,18 +172,23 @@ class Jobs extends EventEmitter {
     const newest = (a, b) => b.created_at.localeCompare(a.created_at);
     if (!body.force) {
       let hit;
+      const now = Date.now();
+      // a finished job stops answering once the hotel's saved customization has changed since it was made
+      const stale = j => { const hid = j.profile && j.profile.hotel_id; if (!hid) return false; try { const c = JSON.parse(fs.readFileSync(path.join(this.hotelsDir, hid, "customization.json"), "utf8")); return !!c.updated_at && Date.parse(c.updated_at) > Date.parse(j.created_at); } catch { return false; } };
+      const answers = j => ACTIVE.has(j.status) || (j.status === "succeeded" && now - Date.parse(j.updated_at) < cfg.idempotencyWindowMs && !stale(j));
       if (clientKey) {
-        hit = this.findJobs(j => j.idempotency && j.idempotency.client_key === clientKey).sort(newest)[0];
-        if (hit && hit.idempotency.key !== key) throw err(`idempotency_key was already used with different parameters (job ${hit.id})`, 422, { conflicting_job: hit.id });
+        const same = this.findJobs(j => j.idempotency && j.idempotency.client_key === clientKey).sort(newest);
+        const clash = same.find(j => j.idempotency.key !== key);
+        if (clash) throw err(`idempotency_key was already used with different parameters (job ${clash.id})`, 422, { conflicting_job: clash.id });
+        hit = same.find(answers);                     // a failed or cancelled job does not answer for the key forever
       } else {
-        const now = Date.now();
-        hit = this.findJobs(j => j.idempotency && j.idempotency.key === key && (ACTIVE.has(j.status) || (j.status === "succeeded" && now - Date.parse(j.updated_at) < cfg.idempotencyWindowMs))).sort(newest)[0];
+        hit = this.findJobs(j => j.idempotency && j.idempotency.key === key && answers(j)).sort(newest)[0];
       }
       if (hit) { this.counters.deduplicated++; this.audit(hit.id, "deduplicated", who, { reason: clientKey ? "idempotency_key" : "identical request" }); return { job: hit, deduplicated: true }; }
     }
     // never two jobs writing the same Hippo page at once
     if (body.load === "api" && body.hippo_page_id) {
-      const busy = this.findJobs(j => j.input.load === "api" && j.input.hippo_page_id === String(body.hippo_page_id) && ACTIVE.has(j.status))[0];
+      const busy = this.findJobs(j => j.input.load === "api" && normPage(j.input.hippo_page_id) === normPage(body.hippo_page_id) && ACTIVE.has(j.status))[0];
       if (busy) throw err(`Hippo page ${body.hippo_page_id} is already being handled by job ${busy.id} (${busy.status}): approve, cancel or finish it first`, 409, { conflicting_job: busy.id });
     }
     return { job: this.create(body, who, { key, client_key: clientKey }), deduplicated: false };
@@ -172,7 +197,7 @@ class Jobs extends EventEmitter {
   create(body, who = "cli", idem = null) {
     const id = "dr_" + Date.now().toString(36) + "_" + crypto.randomBytes(4).toString("hex");
     const d = path.join(this.dir, id); fs.mkdirSync(path.join(d, "capture"), { recursive: true });
-    const input = { hotel_url: body.hotel_url.trim(), hippo_page_id: body.hippo_page_id ? String(body.hippo_page_id) : "", flow: body.flow || "email",
+    const input = { hotel_url: body.hotel_url.trim(), hippo_page_id: normPage(body.hippo_page_id), flow: body.flow || "email",
       mode: body.mode || "review", load: body.load || "manual", label: body.label || "", opportunity_id: body.opportunity_id ? String(body.opportunity_id) : "" };
     if (body.customization && Object.keys(body.customization).length) input.customization = body.customization;
     if (body.save_customization) input.save_customization = true;
@@ -191,6 +216,10 @@ class Jobs extends EventEmitter {
   approve(id, who, notes = "") {
     const job = this.mustGet(id);
     if (job.status !== "awaiting_approval") throw err(`job is ${job.status}, not awaiting_approval`, 409);
+    for (const n of ["plan.json", "qa.json", "profile.json"]) {
+      if (!fs.existsSync(path.join(this.jobDir(id), n))) throw err(`this job was started by an older version of the agent and has no ${n}: apply an edit (an empty {} is enough) to rebuild it with the current checks, then approve it`, 409);
+    }
+    this.assertPageFree(job);
     job.history.push({ at: new Date().toISOString(), event: "approved", by: who, ...(notes ? { notes: String(notes).slice(0, 500) } : {}) }); job.status = "queued"; this.save(job);
     this.audit(id, "approved", who, { notes: notes ? String(notes).slice(0, 500) : undefined, qa_outcome: job.qa_outcome });
     for (const x of this.exceptions.closeFor(id, who, `approved by ${who} with this item acknowledged`, x => x.source === "review_gate")) this.audit(id, "exception_resolved", who, { exception_id: x.exception_id });
@@ -203,6 +232,7 @@ class Jobs extends EventEmitter {
     if (!["awaiting_approval", "failed", "succeeded"].includes(job.status) || !job.stages.convert || job.stages.convert.status !== "ok")
       throw err(`overrides can be applied after the convert stage has finished and the job is idle (job is ${job.status})`, 409);
     if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw err("overrides must be a JSON object", 400);
+    this.assertPageFree(job);
     const p = path.join(this.jobDir(id), "overrides.json");
     const cur = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, "utf8")) : {};
     const merged = deepMerge(cur, patch);
@@ -221,6 +251,7 @@ class Jobs extends EventEmitter {
     const job = this.mustGet(id);
     if (job.status !== "failed") throw err(`only a failed job can be retried (job is ${job.status})`, 409);
     if (this.running.has(id) || this.queue.some(q => q.id === id)) throw err("job is busy", 409);
+    this.assertPageFree(job);
     if ((job.retries || 0) >= cfg.maxManualRetries) throw err(`this job has already been retried ${job.retries} times: start a new job instead`, 409);
     let stage = job.failed_stage;
     if (!stage) throw err("the job did not record which stage failed", 409);
@@ -242,6 +273,11 @@ class Jobs extends EventEmitter {
     const job = this.mustGet(id);
     if (this.running.has(id) || this.queue.some(q => q.id === id)) throw err("job is busy", 409);
     if (!fs.existsSync(path.join(this.jobDir(id), "backup.json"))) throw err("no backup for this job (it was never loaded through the API)", 409);
+    this.assertPageFree(job);
+    // restoring this job's backup would wipe out whatever a later job saved to the same page
+    const mine = (job.stages.load || {}).ended_at || "";
+    const newer = this.findJobs(j => j.id !== job.id && j.input.load === "api" && normPage(j.input.hippo_page_id) === normPage(job.input.hippo_page_id) && j.stages.load && j.stages.load.status === "ok" && (j.stages.load.ended_at || "") > mine)[0];
+    if (newer) throw err(`job ${newer.id} saved this page after this job did: rolling back would overwrite its work`, 409, { conflicting_job: newer.id });
     job.history.push({ at: new Date().toISOString(), event: "rollback requested", by: who }); job.status = "queued"; job.stages.rollback = { status: "pending" }; this.save(job);
     this.audit(id, "rollback_requested", who);
     this.enqueue(id, ["rollback"], "rolled_back");
@@ -264,6 +300,13 @@ class Jobs extends EventEmitter {
   }
 
   mustGet(id) { const j = this.get(id); if (!j) throw err("job not found", 404); return j; }
+
+  // Another active job already owns this job's Hippo page: reviving this one (edit, retry, approve) would put two writers on one page.
+  assertPageFree(job) {
+    if (job.input.load !== "api" || !job.input.hippo_page_id) return;
+    const busy = this.findJobs(j => j.id !== job.id && j.input.load === "api" && normPage(j.input.hippo_page_id) === normPage(job.input.hippo_page_id) && ACTIVE.has(j.status))[0];
+    if (busy) throw err(`Hippo page ${job.input.hippo_page_id} is now being handled by job ${busy.id} (${busy.status}): finish or cancel that one first`, 409, { conflicting_job: busy.id });
+  }
 
   enqueue(id, stages, then) {
     const j = this.get(id); if (j) { j.pending = { stages, then }; this.save(j); }   // lets a restart resume queued work
@@ -333,7 +376,7 @@ class Jobs extends EventEmitter {
     job = this.get(id); job.stage = null;
     if (then === "gate") {
       const rv = this.readJson(id, "review.json") || {};
-      if (rv.needs_review) {
+      if (rv.needs_review !== false) {                          // a missing or unreadable review.json means "ask a person", never "go ahead"
         job.status = "awaiting_approval"; this.save(job); this.writeResult(job);
         this.reconcileReviewExceptions(job, rv);
         this.audit(id, "awaiting_approval", "system", { qa_outcome: rv.qa_outcome, items: (rv.items || []).length });
@@ -344,6 +387,10 @@ class Jobs extends EventEmitter {
       return this.runStages({ id, stages: AFTER_APPROVAL, then: "done" });
     }
     job.status = then === "rolled_back" ? "rolled_back" : "succeeded";
+    if (job.status === "rolled_back") {
+      delete job.error; delete job.failed_stage; delete job.failure_reason; delete job.rolled_back;
+      for (const x of this.exceptions.closeFor(id, "system", "the page was rolled back to its backup")) this.audit(id, "exception_resolved", "system", { exception_id: x.exception_id });
+    }
     this.save(job); this.writeResult(job); this.emit("change", job);
     this.audit(id, job.status === "succeeded" ? "job_succeeded" : "job_rolled_back", "system", { attempts: job.attempt_count });
   }
@@ -351,6 +398,7 @@ class Jobs extends EventEmitter {
   // Facts about the job that later stages and the API want without opening artifacts.
   afterStage(job, stage) {
     const rj = n => this.readJson(job.id, n) || {};
+    if (stage === "intake") { const i = rj("input.json"); if (i.hotel_id) job.input.hotel_id = i.hotel_id; }
     if (stage === "profile") { const p = rj("profile.json"); job.profile = { hotel_id: p.hotel_id, version: p.profile_version, status: p.profile_status }; job.hotel = p.property_name || job.hotel; }
     if (stage === "plan") { const p = rj("plan.json"); job.template_family = p.template_family; job.customization_version = p.customization_version; }
     if (stage === "qa") job.qa_outcome = rj("qa.json").outcome || null;
@@ -362,12 +410,13 @@ class Jobs extends EventEmitter {
     const message = (se && se.message) || last || (r.timedOut ? "timed out" : "exit " + r.code);
     job.status = "failed"; job.failed_stage = stage; job.failure_reason = message; job.error = `${stage}: ${last || (r.timedOut ? "timed out" : "exit " + r.code)}`;
     job.stages[stage].error = { code: (se && se.code) || (r.timedOut ? "STAGE_TIMEOUT" : "STAGE_CRASHED"), category: (se && se.category) || STAGE_CATEGORY[stage] || "INTERNAL_ERROR", retryable: !!(se && se.retryable) || r.code === 3 };
-    if (stage === "verify" && fs.existsSync(path.join(this.jobDir(job.id), "rollback.json"))) job.rolled_back = true;
+    const rb = this.readJson(job.id, "rollback.json");
+    if (stage === "verify" && rb && rb.ok === true) job.rolled_back = true;                // only if the restore itself worked
     if (stage === "qa" || stage === "publish_gate") job.qa_outcome = (this.readJson(job.id, "qa.json") || {}).outcome || job.qa_outcome || null;
     this.save(job); this.writeResult(job);
     const e = job.stages[stage].error;
     const { exception } = this.exceptions.open({ job, stage, severity: "critical", category: e.category, code: e.code, message: attempts > 1 ? `${message} (after ${attempts} attempts)` : message,
-      missing_fields: se && se.missing_fields, retry_eligible: true, details: se && se.details, source: "stage_failure" });
+      missing_fields: se && se.missing_fields, retry_eligible: !!(e.retryable || RETRYABLE_CATEGORIES.has(e.category)), details: se && se.details, source: "stage_failure" });
     job.exception_ids = [...new Set([...(job.exception_ids || []), exception.exception_id])]; this.save(job);
     this.audit(job.id, "stage_finished", "system", { stage, outcome: "failed", code: e.code, category: e.category, attempts });
     this.audit(job.id, "job_failed", "system", { stage, code: e.code, reason: message, attempts, exception_id: exception.exception_id });
@@ -378,14 +427,14 @@ class Jobs extends EventEmitter {
   // is looking at every job anyway: the items are on the review page and nothing is added to the queue.
   reconcileReviewExceptions(job, rv) {
     if (job.input.mode !== "auto") return;
-    const codes = new Set();
+    const keys = new Set();
     for (const it of rv.items || []) {
-      codes.add(it.code);
-      const { exception, created } = this.exceptions.open({ job, stage: "review", severity: "high", category: it.category, code: it.code, message: it.message, missing_fields: it.fields, retry_eligible: false, source: "review_gate" });
+      const key = sha(it.message).slice(0, 12); keys.add(key);
+      const { exception, created } = this.exceptions.open({ job, stage: "review", severity: "high", category: it.category, code: it.code, key, message: it.message, missing_fields: it.fields, retry_eligible: false, source: "review_gate" });
       job.exception_ids = [...new Set([...(job.exception_ids || []), exception.exception_id])];
       if (created) { this.audit(job.id, "exception_opened", "system", { exception_id: exception.exception_id, category: it.category, code: it.code }); this.emit("exception", exception); }
     }
-    for (const x of this.exceptions.closeFor(job.id, "system", "no longer raised after revalidation", x => x.source === "review_gate" && !codes.has(x.error_code))) this.audit(job.id, "exception_resolved", "system", { exception_id: x.exception_id });
+    for (const x of this.exceptions.closeFor(job.id, "system", "no longer raised after revalidation", x => x.source === "review_gate" && !keys.has(x.dedupe_key))) this.audit(job.id, "exception_resolved", "system", { exception_id: x.exception_id });
     this.save(job);
   }
 
@@ -410,7 +459,7 @@ class Jobs extends EventEmitter {
 
   spawnStage(id, stage) {
     return new Promise(resolve => {
-      const env = stageEnv({ HOTELS_DIR: this.hotelsDir });
+      const env = stageEnv({ HOTELS_DIR: this.hotelsDir }, stage);
       const child = spawn(cfg.python, [path.join(cfg.ROOT, "agent", "stages.py"), stage, this.jobDir(id)], { cwd: cfg.ROOT, env, shell: false, stdio: ["ignore", "pipe", "pipe"] });
       this.running.set(id, child);
       let lastLine = "", timedOut = false;
@@ -429,10 +478,12 @@ class Jobs extends EventEmitter {
       if (!n.startsWith("dr_")) continue;
       const j = this.get(n); if (!j) continue;
       if (j.status === "running") {
-        j.status = "failed"; j.error = `server restarted during ${j.stage}`; j.failed_stage = j.stage; j.failure_reason = j.error;
+        j.status = "failed"; j.error = `server restarted during ${j.stage || "start-up"}`; j.failure_reason = j.error;
+        if (j.stage) j.failed_stage = j.stage;
         if (j.stage && j.stages[j.stage]) j.stages[j.stage] = { ...j.stages[j.stage], status: "failed", error: { code: "SERVER_RESTARTED", category: "INTERNAL_ERROR", retryable: true } };
         this.save(j);
-        if (j.stage) { const { exception } = this.exceptions.open({ job: j, stage: j.stage, severity: "high", category: "INTERNAL_ERROR", code: "SERVER_RESTARTED", message: j.error, retry_eligible: true, source: "stage_failure" }); j.exception_ids = [exception.exception_id]; this.save(j); }
+        const { exception } = this.exceptions.open({ job: j, stage: j.stage || "runner", severity: "high", category: "INTERNAL_ERROR", code: "SERVER_RESTARTED", message: j.error, retry_eligible: !!j.stage, source: "stage_failure" });
+        j.exception_ids = [exception.exception_id]; this.save(j);
         this.audit(j.id, "job_failed", "system", { stage: j.stage, code: "SERVER_RESTARTED" });
       } else if (j.status === "queued") {
         if (j.pending && Array.isArray(j.pending.stages)) this.enqueue(j.id, j.pending.stages, j.pending.then);
@@ -466,7 +517,7 @@ class Jobs extends EventEmitter {
   // ---- retention (PDF §15): remove finished jobs older than `days`; jobs with unresolved exceptions, active jobs and the hotel store are kept ----
   purge(days, { dryRun = false } = {}) {
     if (!(days > 0)) throw err("days must be a positive number", 400);
-    const cutoff = Date.now() - days * 86400000, removed = [], open = new Set(this.exceptions.list({ status: "unresolved", limit: 500 }).map(x => x.job_id));
+    const cutoff = Date.now() - days * 86400000, removed = [], open = new Set(this.exceptions.all().filter(x => UNRESOLVED(x.resolution_status)).map(x => x.job_id));
     for (const j of this.findJobs(j => TERMINAL.has(j.status) && Date.parse(j.updated_at) < cutoff && !open.has(j.id))) {
       if (this.running.has(j.id) || this.queue.some(q => q.id === j.id)) continue;
       removed.push(j.id); if (!dryRun) fs.rmSync(this.jobDir(j.id), { recursive: true, force: true });
@@ -477,4 +528,4 @@ class Jobs extends EventEmitter {
   }
 }
 
-module.exports = { Jobs, validateInput, validateCustomization, ARTIFACTS, artifactPath, PIPELINE, AFTER_APPROVAL, REBUILD, ACTIVE };
+module.exports = { Jobs, validateInput, validateCustomization, ARTIFACTS, artifactPath, PIPELINE, AFTER_APPROVAL, REBUILD, ACTIVE, stable, deepMerge, MAX_LOG_BYTES, stageEnv };

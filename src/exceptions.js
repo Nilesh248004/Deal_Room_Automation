@@ -33,7 +33,7 @@ class ExceptionQueue {
 
   // Open an exception, or re-open the unresolved one for the same job, stage and code (a retry that fails the same way is the same exception).
   open(spec) {
-    const same = this.all().find(x => x.job_id === spec.job.id && x.failed_stage === spec.stage && x.error_code === spec.code && UNRESOLVED(x.resolution_status));
+    const same = this.all().find(x => x.job_id === spec.job.id && x.failed_stage === spec.stage && x.error_code === spec.code && (x.dedupe_key || "") === (spec.key || "") && UNRESOLVED(x.resolution_status));
     const now = new Date().toISOString();
     if (same) {
       same.occurrences = (same.occurrences || 1) + 1; same.description = spec.message; same.resolution_status = "open";
@@ -48,7 +48,7 @@ class ExceptionQueue {
       hippo_page_id: j.input.hippo_page_id || null, opportunity_id: j.input.opportunity_id || null,
       failed_stage: spec.stage, severity: SEVERITIES.includes(spec.severity) ? spec.severity : "high", category: spec.category, error_code: spec.code, description: spec.message,
       missing_fields: spec.missing_fields || [], conflicting_fields: spec.conflicting_fields || [], source_references: spec.source_references || [j.input.hotel_url],
-      retry_eligible: !!spec.retry_eligible, assigned_reviewer: null, resolution_notes: "", resolution_status: "open", source: spec.source || "stage_failure",
+      retry_eligible: !!spec.retry_eligible, dedupe_key: spec.key || "", assigned_reviewer: null, resolution_notes: "", resolution_status: "open", source: spec.source || "stage_failure",
       occurrences: 1, details: spec.details || {}, created_at: now, updated_at: now, resolved_at: null,
       history: [{ at: now, by: "system", event: "opened", notes: spec.message }],
     };
