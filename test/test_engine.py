@@ -5,7 +5,7 @@ import copy, http.server, json, os, sys, tempfile, threading
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "agent"))
 for k in ("ALLOW_PRIVATE_HOSTS", "ALLOW_HTTP", "ALLOWED_HOTEL_DOMAINS", "ASSET_CHECK_POLICY", "ASSET_RIGHTS_POLICY"): os.environ.pop(k, None)
-import netsafe as N, assets as AS, customize as CU, hotel_profile as HP, mapping as MP, qa as QA, dealroom_builder as B   # noqa: E402
+import netsafe as N, assets as AS, customize as CU, hotel_profile as HP, mapping as MP, qa as QA, dealroom_builder as B, scrape_to_config as S2C   # noqa: E402
 
 passed = 0
 def ok(cond, name):
@@ -308,6 +308,26 @@ for bad, why in [("<img src=x onerror=alert(1)>", "an event-handler attribute"),
     ok(rx["outcome"] == "FAIL" and any(x["code"] == "ACTIVE_MARKUP" for x in rx["critical"]), f"QA fails on {why} in any text")
 tx = copy.deepcopy(tpl); tx["sections"][1]["components"][0]["data"]["text"] += "<p>Seats &lt;img src=x onerror=alert(1)&gt; people</p>"
 ok(QA.run(tpl=tx, assets=imgs, **qa_in)["outcome"] == "PASS", "the same text, HTML-escaped, is only wording and passes")
+
+# --- found on a real hotel page (Hilton Dallas/Park Cities): text and photos the first version got wrong ---
+ok(S2C.count_fact("Search 1 room, 1 guest Check in", r"(\d+\s+(?:guest\s+)?rooms?)") == "", "the booking form's '1 room, 1 guest' is not a fact about the hotel")
+ok(S2C.count_fact("Rooms 2 rooms, 2 guests", r"(\d+\s+(?:guest\s+)?rooms?)") == "", "a changed booking form ('2 rooms, 2 guests') is still the form")
+ok(S2C.count_fact("The hotel has 250 rooms and 12 suites.", r"(\d+\s+rooms?(?:\s+and\s+\d+\s+suites?)?)") == "250 rooms and 12 suites", "a real room count is kept")
+ok(S2C.count_fact("1 restaurant", r"(\d+\s+restaurants?)") == "" and S2C.count_fact("3 restaurants and 2 bars", r"(\d+\s+restaurants?(?:\s+and\s+\d+\s+bars?)?)") == "3 restaurants and 2 bars", "a default count of 1 is not trusted; a real count is")
+ok(S2C.count_fact("1 room, 1 guest. Our 120 rooms overlook the park", r"(\d+\s+rooms?)") == "120 rooms", "the form is skipped and the real statement later on the page is found")
+cls = lambda alt: S2C.classify({"alt": alt, "url": "https://x.example/a.jpg", "w": 1600, "h": 900}, [])
+ok(cls("King Guestroom with Bed and Lounge Area") == "rooms", "a guestroom photo is not filed under dining because its caption says 'lounge'")
+ok(cls("Lobby Seating Area with Fireplace") == "exterior", "a lobby photo is not filed under guest rooms because its caption says 'seating area'")
+ok(cls("Presidential Suite Living Area") == "rooms" and cls("Lobby Bar") == "dining" and cls("Wedding reception in the ballroom") == "meeting" and cls("Reception desk in the lobby") == "exterior", "the neighbouring cases still go where they should")
+ok(cls("Pool") == "amenities" and cls("Woodbine Bar and Dining Area") == "dining" and cls("Suite Restaurant") == "dining", "a restaurant caption beats a room word")
+ok(not any("GetYourGuide" in x for x in S2C.sentences("Save up to 15% off top attractions, events, and things to do through GetYourGuide when you book a stay at participating hotels.")), "a booking promotion is not a statement about the hotel")
+ok(S2C.sentences("Our rooftop pool overlooks the park and the downtown skyline from the tenth floor.") != [], "ordinary sentences are kept")
+for glued, why in [("Dallas Love Field4 milesAirport shuttleNot available", "words and numbers glued together"), ("1 restaurant.Our coffee bar opens at six", "a missing space after a full stop")]:
+    tg = copy.deepcopy(tpl); tg["sections"][1]["components"][0]["data"]["text"] += "<p>" + glued + "</p>"
+    rg = QA.run(tpl=tg, assets=imgs, **qa_in)
+    ok(rg["outcome"] == "REVIEW" and any(x["code"] == "TEXT_RUN_TOGETHER" for x in rg["review"]), f"QA asks for a look when {why}")
+tg = copy.deepcopy(tpl); tg["sections"][1]["components"][0]["data"]["text"] += "<p>Free WiFi and a DoubleTree welcome cookie, 24hr desk, from 3pm, Wi-Fi 6.</p>"
+ok(QA.run(tpl=tg, assets=imgs, **qa_in)["outcome"] == "PASS", "ordinary wording (WiFi, 24hr, 3pm) is not mistaken for glued text")
 tx = copy.deepcopy(tpl); tx["sections"][1]["components"][0]["data"]["text"] += "<p>" + "1," * 60000 + " USD</p>"
 t0 = _t.time(); QA.run(tpl=tx, assets=imgs, **qa_in)
 ok(_t.time() - t0 < 3, "pathological hotel text cannot stall the QA regexes")

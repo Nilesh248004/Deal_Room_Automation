@@ -28,6 +28,10 @@ def rights_policy():
     return p if p in ("require", "warn") else "require"
 
 
+RUN_TOGETHER = re.compile(r"[a-z]\d|[a-z]{2}[A-Z][a-z]|[a-z0-9][.!?][A-Z][a-z]")
+WORD_OK = {"wifi", "iphone", "ipad", "youtube", "tripadvisor", "opentable", "paypal", "mcdonald", "doubletree"}
+
+
 def _texts(tpl):
     """(location, html) for every rich-text and card text in the template."""
     out = []
@@ -114,6 +118,19 @@ def run(*, tpl, h, plan, profile, pvalid, mapping, assets, others, flow, rights,
         if m: money.append(f"{where}: '{m.group(0).strip()}'")
     add("pre-render", "no_unapproved_commercial_text", "No prices or rates appear in hotel-owned text", "review" if money else "pass", "; ".join(money[:5]),
         [F("COMMERCIAL_TEXT", "COMMERCIAL_APPROVAL", f"hotel text contains commercial wording that needs approval ({x})") for x in money[:5]])
+    # text that looks glued together by the scrape ("Field4 milesAirport", "restaurant.Our") needs a person's eye, not a silent pass
+    own_words = {w.lower() for w in re.findall(r"[A-Za-z]+", profile.get("property_name") or "")}
+    runs = []
+    for where, t in _texts(tpl):
+        plain = re.sub(r"\$\{[^}]*\}", " ", re.sub(r"<[^>]+>", " ", html.unescape(t[:20000])))[:6000]
+        for m in RUN_TOGETHER.finditer(plain):
+            a = plain.rfind(" ", 0, m.start()) + 1; b = plain.find(" ", m.end()); b = len(plain) if b < 0 else b
+            word = plain[a:b].strip(".,;:()\"'")
+            if len(word) < 4 or word.lower() in WORD_OK or word.lower() in own_words: continue
+            runs.append(f"{where}: '{word}'")
+            break
+    add("pre-render", "text_readable", "Hotel text reads cleanly (no words or sentences glued together)", "review" if runs else "pass", "; ".join(runs[:5]),
+        [F("TEXT_RUN_TOGETHER", "UNVERIFIED_CONTENT", f"text looks garbled by the scrape ({x}): correct it with an override") for x in runs[:5]])
     used = {u: w for u, w in _images(tpl).items() if "hippovideo." not in u}      # images already uploaded to Hippo are Hippo's to serve
     unapproved = [] if rights_approved else [a for a in profile.get("assets", []) if a.get("usage_rights_status") != "approved" and (a.get("asset_type") == "logo" or a.get("source_url") in used)]
     if unapproved and rights == "require":

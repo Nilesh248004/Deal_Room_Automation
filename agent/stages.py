@@ -373,7 +373,7 @@ def stage_copy(d):
     if not cfg.get("dining_intro"):
         lead = (f.get("outlets", "").capitalize() + (": " if names else ".")) if f.get("outlets") else ("Dining at the hotel: " if names else "")
         body = (", ".join(names[:-1]) + " and " + names[-1] + ".") if len(names) > 1 else (names[0] + "." if names else stmt(page_text(sc, cfg, r"dining|restaurant"), r"restaurant|bar|cuisine", 2))
-        di = (lead + body).strip()
+        di = (lead + (" " if lead.endswith(".") else "") + body).strip()
         if di: put("dining_intro", esc(di), "dining page")
         else: fb.append("dining_intro")
     if not cfg.get("av_support"):

@@ -137,11 +137,19 @@ def dims(img):
     if m: w, h = max(w, int(m.group(1))), max(h, int(m.group(2)))
     return w, h
 
+ROOM_CUE = r"guest\s?room|\bbed(?:room)?s?\b|\bking\b|\bqueen\b|\btwin\b|\bsuite\b"
+LOBBY_CUE = r"\blobby\b|\breception\b|\bentrance\b|front desk"
+NOT_ROOM = r"restaurant|dining|\bbar\b|kitchen|breakfast|meeting|ballroom|banquet|conference|wedding|\bevent"
+
 def classify(img, hotel_words):
     hay = " ".join([img.get("url", ""), img.get("alt", ""), img.get("context", "")]).lower()
     if re.search(EXCLUDE, hay): return None
     w, h = dims(img)
     if w and w < 600: return None
+    cap = (img.get("alt", "") + " " + img.get("url", "")).lower()
+    # "King Guestroom with Bed and Lounge Area" is a room, not a lounge; "Lobby Seating Area" is the lobby, not a room
+    if re.search(ROOM_CUE, cap) and not re.search(NOT_ROOM, cap): return "rooms"
+    if re.search(LOBBY_CUE, cap) and not re.search(NOT_ROOM + r"|guest\s?room|\bbed\b", cap): return "exterior"
     for cat, rx in CATS:
         if re.search(rx, (img.get("alt", "") + " " + img.get("url", "")).lower()): return cat
     for cat, rx in CATS:
@@ -153,8 +161,21 @@ CSS_JUNK = re.compile(r"(?:\.[\w-]+|@media[^{]*)\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}"
 def clean(text):
     return re.sub(r"[ \t​]+", " ", CSS_JUNK.sub("", text or "")).replace("​", "")
 
+# Third-party and booking promotions ("Save up to 15% off ... when you book a stay at participating hotels") are not facts about this hotel.
+PROMO = re.compile(r"\bsave up to\b|\b\d+\s?%\s*off\b|\bdiscounts?\b|\bwhen you book\b|\bbook (?:a stay|now|today|direct)\b|\bparticipating hotels\b|\bpromo(?:tional)? codes?\b", re.I)
+
 def sentences(text):
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", clean(text)) if 25 <= len(s.strip()) <= 260]
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", clean(text)) if 25 <= len(s.strip()) <= 260 and not PROMO.search(s)]
+
+def count_fact(text, rx, minimum=2):
+    """First 'N rooms' / 'N restaurants' that states something about the hotel. Not a default of 1, and not the booking
+    form's '1 room, 1 guest', which every hotel page carries."""
+    for m in re.finditer(rx, text or "", re.I):
+        n = int(re.match(r"\d+", m.group(1)).group())
+        if n < minimum: continue
+        if re.match(r"\s*[,/|·&-]?\s*\d+\s*(?:adults?|guests?|children|travell?ers?)\b", (text or "")[m.end():], re.I): continue
+        return m.group(1).strip()
+    return ""
 
 def find(text, rx, n=1):
     out, seen = [], set()
@@ -346,11 +367,13 @@ def convert(sc):
     room_rows = [[html.escape(r["title"]), html.escape(size_of(r["specs"])), html.escape(guests_of(r["specs"], {}))] for r in rooms_raw]
     if not venue_rows: warnings.append("no venue capacities found: the venue table will be left out")
     info = {}
-    for k, rx in {"checkin": r"check-?in\s+(?:from|at|time:?)\s*([0-9: ]+\s*(?:am|pm|noon)?)", "checkout": r"check-?out\s+(?:until|by|at|time:?)\s*([0-9: ]*\s*(?:am|pm|noon))",
-                  "rooms": r"(\d+\s+(?:guest\s+)?rooms?(?:\s+(?:and|&amp;|&)\s+(?:\d+\s+)?suites?)?)", "outlets": r"(\d+\s+restaurants?(?:\s+and\s+\d+\s+bars?)?)"}.items():
+    for k, rx in {"checkin": r"check-?in\s+(?:from|at|time:?)\s*([0-9: ]+\s*(?:am|pm|noon)?)", "checkout": r"check-?out\s+(?:until|by|at|time:?)\s*([0-9: ]*\s*(?:am|pm|noon))"}.items():
         m2 = re.search(rx, all_text, re.I)
         if m2: info[k] = m2.group(1).strip()
-    rooms_line = re.search(r"\d+\s+rooms?(?:\s+and\s+\d+\s+suites?)?", all_text)
+    for k, rx in {"rooms": r"(\d+\s+(?:guest\s+)?rooms?(?:\s+(?:and|&amp;|&)\s+(?:\d+\s+)?suites?)?)", "outlets": r"(\d+\s+restaurants?(?:\s+and\s+\d+\s+bars?)?)"}.items():
+        c = count_fact(all_text, rx)
+        if c: info[k] = c
+    rooms_line = count_fact(all_text, r"(\d+\s+rooms?(?:\s+and\s+\d+\s+suites?)?)")
     highlights = []
     hm = re.search(r"Highlights\s*\n(.+?)(?:\n(?:Unparalleled|Offers|Information|Hotel\s*Information)|$)", main_text + "\n" + sub(r"overview|" + re.escape(base) + "$"), re.S)
     if hm:
@@ -373,7 +396,7 @@ def convert(sc):
         "highlights": highlights[:6],
         "facts": info,
         "fits": [{"icon": ic, "title": html.escape(h), "body": ""} for ic, h in zip(["aeroplane", "house", "money", "shield"], highlights[:4])],
-        "rooms_intro": html.escape(((rooms_line.group(0) + ". ") if rooms_line else "") + find(room_txt, r"room|suite[^.]*\.", 1)).strip(),
+        "rooms_intro": html.escape(((rooms_line + ". ") if rooms_line else "") + find(room_txt, r"room|suite[^.]*\.", 1)).strip(),
         "room_types": {"columns": ["Room type", "Size", "Guests"], "rows": room_rows} if room_rows else None,
         "meeting_intro": "",
         "venues": {"note": "Capacities as published by the hotel; confirm setups with the hotel.", "columns": ["Venue", "Area"] + [html.escape(s) for s in styles], "rows": venue_rows},
