@@ -14,7 +14,7 @@ def ok(cond, name):
 def intake(url, **kw):
     d = tempfile.mkdtemp()
     json.dump({"id": "t", "input": {"hotel_url": url, **kw}}, open(f"{d}/job.json", "w"))
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "agent", "stages.py"), "intake", d], capture_output=True, text=True, env={**os.environ, "ALLOW_HTTP": ""})
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "agent", "stages.py"), "intake", d], capture_output=True, text=True, env={**os.environ, "ALLOW_HTTP": "", "ALLOW_PRIVATE_HOSTS": "", "ALLOWED_HOTEL_DOMAINS": ""})
     return r.returncode, r.stdout + r.stderr, d
 
 print("intake")
@@ -33,6 +33,21 @@ code, out, d = intake("https://www.ihg.com/x", hippo_page_id="12a")
 ok(code != 0, "page id must be digits")
 code, out, d = intake("https://www.ihg.com/x", flow="sms")
 ok(code != 0, "flow must be email|cvent")
+
+print("intake: source safety, customization, structured errors")
+for url, why in [("https://169.254.169.254/latest/meta-data", "cloud metadata address"), ("https://localhost/admin", "localhost"), ("https://10.0.0.5/hotel", "private network"),
+                 ("https://user:secret@www.ihg.com/x", "credentials in the URL"), ("https://www.ihg.com:8443/x", "non-standard port")]:
+    code, out, d = intake(url)
+    err = json.load(open(f"{d}/stage_error.json")) if os.path.exists(f"{d}/stage_error.json") else {}
+    ok(code == 2 and "not allowed" in out and err.get("code") == "URL_NOT_ALLOWED" and err.get("category") == "SOURCE_UNVERIFIED" and err.get("retryable") is False, f"rejects {why} with a recorded, non-retryable error")
+code, out, d = intake("https://www.ihg.com/hotels/x", customization={"focus": "party"})
+err = json.load(open(f"{d}/stage_error.json"))
+ok(code == 2 and err["code"] == "CUSTOMIZATION_INVALID" and err["category"] == "INVALID_INPUT" and "focus" in err["message"], "an invalid customization is rejected at intake, before any capture")
+code, out, d = intake("https://www.ihg.com/hotels/x", opportunity_id="bad id!")
+ok(code == 2 and "opportunity_id" in out, "opportunity_id is validated")
+code, out, d = intake("https://www.tajhotels.com/en-in/hotels/jai-mahal-palace-jaipur/?utm_source=a", opportunity_id="OPP-42", customization={"focus": "event"})
+inp = json.load(open(f"{d}/input.json"))
+ok(code == 0 and inp["hotel_id"].startswith("jai-mahal-palace-jaipur-") and inp["opportunity_id"] == "OPP-42" and not os.path.exists(f"{d}/stage_error.json"), "a good intake derives the hotel id and keeps the opportunity reference")
 
 print("grounding")
 corpus = "Jai Mahal Palace sits in 18 acres of gardens. 94 rooms and 6 suites. Cinnamon restaurant. Jaipur airport is 30 minutes away."

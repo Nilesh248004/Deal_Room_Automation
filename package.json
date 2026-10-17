@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node src/server.js",
     "cli": "node src/cli.js",
-    "test": "python3 test/test_stages.py && node --test --test-concurrency=1 test/e2e.test.js",
+    "test": "python3 test/test_stages.py && python3 test/test_engine.py && node --test --test-concurrency=1 test/e2e.test.js",
+    "test:unit": "python3 test/test_stages.py && python3 test/test_engine.py",
     "test:loader": "python3 test/test_loader.py"
   },
   "dependencies": {}

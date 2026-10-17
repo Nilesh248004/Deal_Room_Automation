@@ -2,7 +2,7 @@
 //   GET   /api/video_page/templates/:id/editor?fromPreview=false
 //   PATCH /api/video_page/pages        (form-urlencoded: template=<json>&page_id=<id>)
 // Auth: "Authorization: Bearer test-token" or Cookie + X-CSRF-Token.
-// Test hooks: GET /__log, POST /__reset, POST /__mode {"drop_section_on_save": true}
+// Test hooks: GET /__log, POST /__reset, POST /__mode {"drop_section_on_save": true, "fail_next": <n>}   (fail_next: answer the next n API calls with HTTP 503, applying nothing)
 "use strict";
 const http = require("node:http");
 const fs = require("node:fs");
@@ -24,6 +24,7 @@ const server = http.createServer(async (req, res) => {
   if (u.pathname === "/__mode") { mode = JSON.parse(await body(req) || "{}"); return json(res, 200, mode); }
   if (u.pathname.startsWith("/__page/")) return json(res, 200, pages[u.pathname.split("/")[2]] || null);
   if (!authed(req)) { log.push({ method: req.method, path: u.pathname, status: 401 }); return json(res, 401, { status: false, message: "User Not Found" }); }
+  if (mode.fail_next > 0) { mode.fail_next--; log.push({ method: req.method, path: u.pathname, status: 503 }); res.writeHead(503, { "content-type": "application/json", "retry-after": "0" }); return res.end(JSON.stringify({ success: false, message: "try again" })); }
   let m = u.pathname.match(/^\/api\/video_page\/templates\/(\d+)\/editor$/);
   if (req.method === "GET" && m) {
     log.push({ method: "GET", path: u.pathname, page: m[1] });

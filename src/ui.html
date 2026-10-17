@@ -15,25 +15,34 @@
   @media (max-width: 900px) { main { grid-template-columns: 1fr; padding:16px; } header { padding:16px; } }
   section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; min-width:0; }
   h2 { font-size:15px; margin:0 0 12px; }
+  h3 { font-size:13px; margin:14px 0 6px; }
   label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
   input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font:inherit; }
-  textarea { font:12px/1.4 ui-monospace, Menlo, monospace; min-height:140px; }
+  input[type=checkbox] { width:auto; margin-right:6px; }
+  label.check { display:flex; align-items:center; color:var(--ink); font-size:13px; }
+  textarea { font:12px/1.4 ui-monospace, Menlo, monospace; min-height:110px; }
   .row { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; }
+  .row2 { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
   button { padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); font:inherit; cursor:pointer; }
   button.primary { background:var(--accent); color:var(--bg); border-color:var(--accent); }
   button:disabled { opacity:.4; cursor:default; }
   .btns { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
   table { width:100%; border-collapse:collapse; }
-  td { padding:8px 4px; border-top:1px solid var(--line); vertical-align:top; cursor:pointer; overflow-wrap:anywhere; }
+  td, th { padding:8px 4px; border-top:1px solid var(--line); vertical-align:top; overflow-wrap:anywhere; text-align:left; }
+  tr[data-id] td, tr[data-job] td, tr[data-hotel] td { cursor:pointer; }
   tr.sel td { background:var(--bg); }
   .pill { display:inline-block; padding:1px 8px; border-radius:99px; font-size:12px; border:1px solid currentColor; white-space:nowrap; }
-  .s-succeeded,.s-ok { color:var(--ok); } .s-failed,.s-cancelled { color:var(--bad); } .s-awaiting_approval { color:var(--warn); }
-  .s-running,.s-queued { color:var(--run); } .s-pending,.s-skipped,.s-rolled_back { color:var(--muted); }
+  .s-succeeded,.s-ok,.q-PASS { color:var(--ok); } .s-failed,.s-cancelled,.q-FAIL { color:var(--bad); } .s-awaiting_approval,.q-REVIEW { color:var(--warn); }
+  .s-running,.s-queued,.s-retrying { color:var(--run); } .s-pending,.s-skipped,.s-rolled_back { color:var(--muted); }
   .stages { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
   pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; max-height:420px; overflow:auto; font:12px/1.45 ui-monospace, Menlo, monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
   .muted { color:var(--muted); font-size:12px; }
   .err { color:var(--bad); }
+  .warn { color:var(--warn); }
   ul.hi { color:var(--bad); margin:6px 0; padding-left:18px; }
+  ul.plain { margin:6px 0; padding-left:18px; }
+  .exc { border:1px solid var(--line); border-left:3px solid var(--bad); border-radius:8px; padding:8px 10px; margin:8px 0; }
+  .exc.high { border-left-color:var(--warn); }
 </style>
 </head>
 <body>
@@ -55,14 +64,31 @@
         <div><label for="mode">Mode</label><select id="mode"><option value="review">Review</option><option value="auto">Auto</option></select></div>
         <div><label for="load">Load</label><select id="load"><option value="manual">File</option><option value="api">API</option></select></div>
       </div>
+      <div class="row2">
+        <div><label for="focus">Focus</label><select id="focus"><option value="">Standard</option><option value="event">Event (meeting space first)</option><option value="meetings">Meeting-space focused</option><option value="leisure">Leisure (rooms first)</option><option value="rooms">Rooms</option></select></div>
+        <div><label for="family">Template family</label><select id="family"><option value="">Auto</option><option value="standard">Standard</option><option value="premium">Premium</option><option value="corporate_event">Corporate event</option><option value="resort_leisure">Resort / leisure</option><option value="meeting_space">Meeting space</option></select></div>
+      </div>
+      <label for="opp">Opportunity reference (optional)</label>
+      <input id="opp" placeholder="OPP-1042">
+      <label for="cust">More customization (optional JSON): preferred_sections, exclude_sections, include_tour_videos, include_gallery, cta_buttons, branding …</label>
+      <textarea id="cust" style="min-height:70px" placeholder='{"preferred_sections": ["Meetings", "Pricing"], "include_tour_videos": false}'></textarea>
+      <label class="check"><input id="saveCust" type="checkbox"> Keep this customization as the hotel's default</label>
       <label for="scrape">Optional: scrape file from the browser scraper (for sites that block servers)</label>
       <input id="scrape" type="file" accept=".json,application/json">
       <div class="btns"><button class="primary" id="go">Build deal room</button></div>
       <p id="msg" class="muted"></p>
     </section>
     <section>
+      <h2>Needs attention</h2>
+      <table id="exc"></table>
+    </section>
+    <section>
       <h2>Recent</h2>
       <table id="jobs"></table>
+    </section>
+    <section>
+      <h2>Hotels</h2>
+      <table id="hotels"></table>
     </section>
   </div>
   <div>
@@ -81,16 +107,22 @@ const api = async (path, opts = {}) => {
   return r;
 };
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-let current = null, logFrom = 0, logText = "";
+const human = s => String(s || "").replace(/_/g, " ").toLowerCase();
+let current = null, currentHotel = null, logFrom = 0, logText = "", auditOpen = false;
 
 $("go").onclick = async () => {
   $("msg").textContent = ""; $("msg").className = "muted";
   const body = { hotel_url: $("url").value.trim(), flow: $("flow").value, mode: $("mode").value, load: $("load").value };
   if ($("page").value.trim()) body.hippo_page_id = $("page").value.trim();
+  if ($("opp").value.trim()) body.opportunity_id = $("opp").value.trim();
   try {
     const f = $("scrape").files[0]; if (f) body.scrape = JSON.parse(await f.text());
+    let c = $("cust").value.trim() ? JSON.parse($("cust").value) : {};
+    if ($("focus").value) c.focus = $("focus").value;
+    if ($("family").value) c.template_family = $("family").value;
+    if (Object.keys(c).length) { body.customization = c; if ($("saveCust").checked) body.save_customization = true; }
     const j = await (await api("/deal-rooms", { method: "POST", body: JSON.stringify(body) })).json();
-    $("msg").textContent = "Started " + j.id; select(j.id); refresh();
+    $("msg").textContent = j.deduplicated ? "An identical request already has job " + j.id + ": not starting a duplicate." : "Started " + j.id; select(j.id); refresh();
   } catch (e) { $("msg").textContent = e.message; $("msg").className = "err"; }
 };
 
@@ -98,12 +130,23 @@ async function refresh() {
   if (!KEY) return;
   try {
     const { jobs } = await (await api("/deal-rooms?limit=30")).json();
-    $("jobs").innerHTML = jobs.map(j => `<tr data-id="${esc(j.id)}" class="${j.id === current ? "sel" : ""}"><td><b>${esc(j.hotel || new URL(j.hotel_url).hostname)}</b><br><span class="muted">${esc(j.flow)} · ${new Date(j.created_at).toLocaleString()}</span></td><td><span class="pill s-${esc(j.status)}">${esc(j.status.replace("_", " "))}</span></td></tr>`).join("") || '<tr><td class="muted">No jobs yet.</td></tr>';
+    $("jobs").innerHTML = jobs.map(j => `<tr data-id="${esc(j.id)}" class="${j.id === current ? "sel" : ""}"><td><b>${esc(j.hotel || new URL(j.hotel_url).hostname)}</b><br><span class="muted">${esc(j.flow)}${j.template_family ? " · " + esc(human(j.template_family)) : ""} · ${new Date(j.created_at).toLocaleString()}</span></td><td>${j.qa_outcome ? `<span class="pill q-${esc(j.qa_outcome)}">${esc(j.qa_outcome)}</span> ` : ""}<span class="pill s-${esc(j.status)}">${esc(j.status.replace("_", " "))}</span></td></tr>`).join("") || '<tr><td class="muted">No jobs yet.</td></tr>';
     document.querySelectorAll("#jobs tr[data-id]").forEach(tr => tr.onclick = () => select(tr.dataset.id));
   } catch (e) { $("jobs").innerHTML = `<tr><td class="err">${esc(e.message)}</td></tr>`; }
+  try {
+    const { exceptions } = await (await api("/exceptions?status=unresolved&limit=15")).json();
+    $("exc").innerHTML = exceptions.map(x => `<tr data-job="${esc(x.job_id)}"><td><b>${esc(human(x.category))}</b> <span class="pill ${x.severity === "critical" ? "s-failed" : "s-awaiting_approval"}">${esc(x.severity)}</span><br><span class="muted">${esc(x.hotel_name || x.hotel_url)} · ${esc(x.failed_stage)}${x.occurrences > 1 ? " · seen " + x.occurrences + "×" : ""}</span><br>${esc(x.description.slice(0, 150))}</td></tr>`).join("") || '<tr><td class="muted">Nothing needs attention.</td></tr>';
+    document.querySelectorAll("#exc tr[data-job]").forEach(tr => tr.onclick = () => select(tr.dataset.job));
+  } catch (e) { $("exc").innerHTML = ""; }
+  try {
+    const { hotels } = await (await api("/hotels")).json();
+    $("hotels").innerHTML = hotels.map(h => `<tr data-hotel="${esc(h.hotel_id)}" class="${h.hotel_id === currentHotel ? "sel" : ""}"><td><b>${esc(h.property_name || h.hotel_id)}</b><br><span class="muted">profile v${h.latest_version}${h.approved_version ? ", approved v" + h.approved_version : ", not approved yet"}${h.has_customization ? " · customized" : ""}</span></td></tr>`).join("") || '<tr><td class="muted">No hotels yet.</td></tr>';
+    document.querySelectorAll("#hotels tr[data-hotel]").forEach(tr => tr.onclick = () => selectHotel(tr.dataset.hotel));
+  } catch (e) { $("hotels").innerHTML = ""; }
 }
 
-function select(id) { if (id !== current) { current = id; logFrom = 0; logText = ""; } show(); }
+function select(id) { currentHotel = null; if (id !== current) { current = id; logFrom = 0; logText = ""; auditOpen = false; } show(); }
+function selectHotel(id) { current = null; currentHotel = id; showHotel(); }
 
 async function show() {
   if (!current) return;
@@ -111,26 +154,38 @@ async function show() {
   try { const r = await api(`/deal-rooms/${current}/logs?from=${logFrom}`); const t = await r.text(); logText += t; logFrom = +r.headers.get("x-log-size") || logFrom; } catch (e) {}
   let arts = []; try { arts = (await (await api(`/deal-rooms/${current}/artifacts`)).json()).artifacts; } catch (e) {}
   let rv = null; if (arts.includes("review.json")) try { rv = await (await api(`/deal-rooms/${current}/artifacts/review.json`)).json(); } catch (e) {}
-  const st = Object.entries(j.stages).map(([k, v]) => `<span class="pill s-${esc(v.status)}" title="${esc(v.note || "")}">${esc(k)}</span>`).join("");
+  let plan = null; if (arts.includes("plan.json")) try { plan = await (await api(`/deal-rooms/${current}/artifacts/plan.json`)).json(); } catch (e) {}
+  let exs = []; try { exs = (await (await api(`/exceptions?job_id=${current}&status=unresolved`)).json()).exceptions; } catch (e) {}
+  let events = []; if (auditOpen) try { events = (await (await api(`/deal-rooms/${current}/audit?limit=60`)).json()).events; } catch (e) {}
+  const st = Object.entries(j.stages).map(([k, v]) => `<span class="pill s-${esc(v.status)}" title="${esc(v.note || (v.attempts > 1 ? v.attempts + " attempts" : "") || "")}">${esc(k)}${v.attempts > 1 ? " ×" + v.attempts : ""}</span>`).join("");
   const busy = ["queued", "running"].includes(j.status);
+  const unmet = plan ? plan.unmet_requests : [], omitted = plan ? plan.omitted : [];
   $("detail").innerHTML = `
-    <h2>${esc(j.hotel || j.input.hotel_url)} <span class="pill s-${esc(j.status)}">${esc(j.status.replace("_", " "))}</span></h2>
-    <div class="muted">${esc(j.id)} · ${esc(j.input.flow)} flow · ${esc(j.input.mode)} · load ${esc(j.input.load)}${j.input.hippo_page_id ? " · page " + esc(j.input.hippo_page_id) : ""} · by ${esc(j.created_by)}</div>
+    <h2>${esc(j.hotel || j.input.hotel_url)} <span class="pill s-${esc(j.status)}">${esc(j.status.replace("_", " "))}</span>${j.qa_outcome ? ` <span class="pill q-${esc(j.qa_outcome)}" title="Quality assurance">QA ${esc(j.qa_outcome)}</span>` : ""}</h2>
+    <div class="muted">${esc(j.id)} · ${esc(j.input.flow)} flow · ${esc(j.input.mode)} · load ${esc(j.input.load)}${j.input.hippo_page_id ? " · page " + esc(j.input.hippo_page_id) : ""}${j.input.opportunity_id ? " · " + esc(j.input.opportunity_id) : ""} · by ${esc(j.created_by)}</div>
+    ${j.profile ? `<div class="muted">Hotel <a href="#" id="lHotel">${esc(j.profile.hotel_id)}</a> · profile v${esc(j.profile.version)} (${esc(j.profile.status)})${j.template_family ? " · template family " + esc(human(j.template_family)) : ""}${j.attempt_count > 12 ? " · " + j.attempt_count + " stage attempts" : ""}</div>` : ""}
     <div class="stages">${st}</div>
     ${j.error ? `<p class="err">${esc(j.error)}${j.rolled_back ? " (page was rolled back to its backup)" : ""}</p>` : ""}
+    ${exs.map(x => `<div class="exc ${esc(x.severity)}"><b>${esc(human(x.category))}</b> · ${esc(x.failed_stage)} · ${esc(x.severity)}${x.assigned_reviewer ? " · " + esc(x.assigned_reviewer) : ""}<br>${esc(x.description)}${x.missing_fields.length ? `<br><span class="muted">Missing or affected: ${esc(x.missing_fields.join(", "))}</span>` : ""}<br><span class="muted">${esc(x.exception_id)}${x.retry_eligible ? " · can be retried" : " · fix with edits below"}</span></div>`).join("")}
     ${rv && rv.high_severity && rv.high_severity.length ? `<b class="err">Check before approving:</b><ul class="hi">${rv.high_severity.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+    ${omitted.length || unmet.length ? `<h3>Plan</h3><ul class="plain">${omitted.map(o => `<li>Left out <b>${esc(o.title)}</b>: ${esc(o.reason)}</li>`).join("")}${unmet.map(u => `<li class="warn">Could not deliver ${esc(u.request)}: ${esc(u.reason)}</li>`).join("")}</ul>` : ""}
     <div class="btns">
       <button id="bReview" ${arts.includes("review.html") ? "" : "disabled"}>Open review page</button>
       <button id="bLoader" ${arts.includes("loader.js") ? "" : "disabled"}>Download loader.js</button>
       <button id="bTpl" ${arts.includes("template.json") ? "" : "disabled"}>template.json</button>
       <button id="bShot" ${arts.includes("page.png") ? "" : "disabled"}>Site screenshot</button>
+      <button id="bAudit">${auditOpen ? "Hide" : "Show"} audit trail</button>
     </div>
     <div class="btns">
       <button class="primary" id="bApprove" ${j.status === "awaiting_approval" ? "" : "disabled"}>Approve${j.input.load === "api" ? " and load into Hippo" : ""}</button>
+      <button id="bRetry" ${j.status === "failed" && j.failed_stage ? "" : "disabled"}>Retry${j.failed_stage ? " from " + esc(j.failed_stage) : ""}</button>
       <button id="bRollback" ${arts.includes("backup.json") && !busy ? "" : "disabled"}>Roll back page</button>
       <button id="bCancel" ${busy || j.status === "awaiting_approval" ? "" : "disabled"}>Cancel</button>
     </div>
-    <label for="ov">Edit copy, photos or facts (JSON merged into the config, then rebuilt). Example: {"overview": "…", "slots": {"gallery": ["exterior_1", "rooms_1"]}}</label>
+    <label for="note">Approval note (optional, kept in the audit trail)</label>
+    <input id="note" maxlength="300" placeholder="e.g. checked the photos against the hotel's press kit">
+    ${auditOpen ? `<h3>Audit trail</h3><table>${events.map(e => `<tr><td class="muted">${new Date(e.at).toLocaleTimeString()}</td><td>${esc(e.event.replace(/_/g, " "))}</td><td class="muted">${esc(e.by || "")} ${esc(e.stage || e.code || e.outcome || "")}</td></tr>`).join("")}</table>` : ""}
+    <label for="ov">Edit copy, photos, facts or customization (JSON merged into the config, then rebuilt). Example: {"overview": "…", "customization": {"include_gallery": false}}</label>
     <textarea id="ov" placeholder='{"dining_intro": "…"}'></textarea>
     <div class="btns"><button id="bOv" ${["awaiting_approval", "failed", "succeeded"].includes(j.status) ? "" : "disabled"}>Apply edits and rebuild</button></div>
     <label>Log</label><pre id="log">${esc(logText)}</pre>`;
@@ -144,18 +199,46 @@ async function show() {
     const base = `<base href="${location.origin}/">`;
     return URL.createObjectURL(new Blob([page.replace("<head>", "<head>" + base)], { type: "text/html" }));
   };
-  const act = (id, fn) => { const b = $(id); if (b) b.onclick = async () => { try { await fn(); } catch (e) { alert(e.message); } show(); refresh(); }; };
+  const act = (id, fn) => { const b = $(id); if (b) b.onclick = async e => { e.preventDefault(); try { await fn(); } catch (err) { alert(err.message); } show(); refresh(); }; };
   act("bReview", async () => window.open(await reviewBlob(), "_blank", "noopener"));
   act("bShot", async () => window.open(await blob("page.png", "image/png"), "_blank", "noopener"));
   act("bTpl", async () => window.open(await blob("template.json", "application/json"), "_blank", "noopener"));
   act("bLoader", async () => { const a = document.createElement("a"); a.href = await blob("loader.js", "text/javascript"); a.download = `deal-room-loader-${current}.js`; a.click(); });
-  act("bApprove", async () => { if (confirm(j.input.load === "api" ? "Load this deal room into Hippo page " + j.input.hippo_page_id + "? A backup is taken first." : "Approve and produce the loader file?")) await api(`/deal-rooms/${current}/approve`, { method: "POST" }); });
+  act("bAudit", async () => { auditOpen = !auditOpen; });
+  act("bApprove", async () => { if (confirm(j.input.load === "api" ? "Load this deal room into Hippo page " + j.input.hippo_page_id + "? A backup is taken first." : "Approve and produce the loader file?")) await api(`/deal-rooms/${current}/approve`, { method: "POST", body: JSON.stringify({ notes: $("note").value.trim() }) }); });
+  act("bRetry", async () => { if (confirm("Resume this job from the " + j.failed_stage + " stage? Earlier stages are kept.")) await api(`/deal-rooms/${current}/retry`, { method: "POST" }); });
   act("bRollback", async () => { if (confirm("Restore page " + j.input.hippo_page_id + " from the backup taken before loading?")) await api(`/deal-rooms/${current}/rollback`, { method: "POST" }); });
   act("bCancel", async () => { if (confirm("Cancel this job?")) await api(`/deal-rooms/${current}/cancel`, { method: "POST" }); });
   act("bOv", async () => { const t = $("ov").value.trim(); if (!t) return; JSON.parse(t); await api(`/deal-rooms/${current}/overrides`, { method: "POST", body: t }); });
+  act("lHotel", async () => { selectHotel(j.profile.hotel_id); });
 }
 
-setInterval(() => { refresh(); const ta = $("ov"); if (current && !(ta && (ta.value || document.activeElement === ta))) show(); }, 3000);
+async function showHotel() {
+  if (!currentHotel) return;
+  let h; try { h = await (await api("/hotels/" + currentHotel)).json(); } catch (e) { $("detail").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  $("detail").innerHTML = `
+    <h2>${esc(h.property_name || h.hotel_id)}</h2>
+    <div class="muted">${esc(h.hotel_id)} · ${esc(h.official_website_url || "")} · profile v${h.latest_version}${h.approved_version ? ", approved v" + h.approved_version : ", not approved yet"}</div>
+    ${h.regeneration_required ? `<p class="warn"><b>Regeneration to consider.</b> ${esc(h.regeneration_note)}</p>` : ""}
+    <h3>Saved customization</h3>
+    <p class="muted">Applied to every deal room for this hotel unless a request says otherwise. Approving brand-asset rights (asset_rights) needs an admin key.${h.customization_updated_by ? " Last saved by " + esc(h.customization_updated_by) + "." : ""}</p>
+    <textarea id="hc">${esc(JSON.stringify(h.customization || {}, null, 2))}</textarea>
+    <div class="btns"><button class="primary" id="bHc">Save customization</button><button id="bHv">Profile versions</button></div>
+    <pre id="hv" hidden></pre>
+    <h3>Deal rooms generated</h3>
+    <table>${h.generations.map(g => `<tr data-job="${esc(g.job_id)}"><td>${esc(g.job_id)}<br><span class="muted">${esc(g.template_family)} · profile v${g.profile_version}${g.hippo_page_id ? " · page " + esc(g.hippo_page_id) : ""}${g.opportunity_id ? " · " + esc(g.opportunity_id) : ""} · approved by ${esc(g.approved_by)}</span></td></tr>`).join("") || '<tr><td class="muted">None yet.</td></tr>'}</table>`;
+  document.querySelectorAll("#detail tr[data-job]").forEach(tr => tr.onclick = () => select(tr.dataset.job));
+  $("bHc").onclick = async () => { try { await api(`/hotels/${currentHotel}/customization`, { method: "PUT", body: JSON.stringify(JSON.parse($("hc").value || "{}")) }); showHotel(); refresh(); } catch (e) { alert(e.message); } };
+  $("bHv").onclick = async () => { try { const { versions } = await (await api(`/hotels/${currentHotel}/versions`)).json(); $("hv").hidden = false; $("hv").textContent = versions.map(v => `v${v.version}  ${v.profile_status}${v.approved_by ? " by " + v.approved_by : ""}  ${v.built_at}`).join("\n"); } catch (e) { alert(e.message); } };
+}
+
+setInterval(() => {
+  refresh();
+  const ta = $("ov"), hc = $("hc"), note = $("note");
+  const typing = el => el && (el.value || document.activeElement === el);
+  if (current && !typing(ta) && !typing(note)) show();
+  else if (currentHotel && !typing(hc)) showHotel();
+}, 3000);
 refresh();
 </script>
 </body>

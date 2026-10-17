@@ -20,12 +20,27 @@ SAVE_KEYS = ["multiple_logo_top", "sections", "sideNav", "header_cta_buttons", "
 WHITE, INK = "#FFFFFF", "#1A1A1A"
 REQUIRED = ["slug", "name", "location_tag", "address", "brand", "logos", "media", "slots", "map", "overview", "fits",
             "rooms_intro", "meeting_intro", "venues", "dining_intro", "av_support", "location_intro", "location_cards", "amenities_line"]
+# With a section plan only what the planned sections cannot do without is required; the prose intros are optional
+# (an intro with nothing sourced behind it is left out rather than faked: PDF §8.3).
+REQUIRED_GLOBAL = ["slug", "name", "location_tag", "address", "brand", "logos", "media", "slots", "map", "overview"]
+REQUIRED_BY_SECTION = {"fits": ["fits"], "location": ["location_intro", "location_cards"]}
+
+
+def required_for(section_keys):
+    return REQUIRED_GLOBAL + [k for s in section_keys for k in REQUIRED_BY_SECTION.get(s, [])]
 # Section ids kept stable across rebuilds so editor comments stay attached
 SECTION_IDS = {"Overview": "section_u62zhL88", "Important Details": "section_ID5XNXDd", "Why This Hotel Fits": "section_14c03f72ff02",
                "Guest Rooms": "section_4a708ecd8dda", "Pricing Summary": "section_iIWtiFcQ", "Concessions & Value Adds": "section_dec0a81bbb3b",
                "Meeting Space": "section_00f53ffe7df4", "Dining": "section_UGFSOfoc", "AV & Technology": "section_70fb5658eb6a",
                "Location & Destination": "section_9c0b417f309d", "Amenities & Fees": "section_Ulm3vepC",
                "Virtual Tour & Gallery": "section_M5wPOto9", "Proposal PDF": "section_kbRd69pl", "Next Steps": "section_U4ncGymv"}
+SECTION_ID_BY_KEY = {"overview": SECTION_IDS["Overview"], "fits": SECTION_IDS["Why This Hotel Fits"], "rooms": SECTION_IDS["Guest Rooms"],
+                     "concessions": SECTION_IDS["Concessions & Value Adds"], "meeting": SECTION_IDS["Meeting Space"], "pricing": SECTION_IDS["Pricing Summary"],
+                     "dining": SECTION_IDS["Dining"], "amenities": SECTION_IDS["Amenities & Fees"], "av": SECTION_IDS["AV & Technology"],
+                     "location": SECTION_IDS["Location & Destination"], "gallery": SECTION_IDS["Virtual Tour & Gallery"], "pdf": SECTION_IDS["Proposal PDF"],
+                     "next_steps": SECTION_IDS["Next Steps"]}
+DEFAULT_ORDER = ["overview", "fits", "rooms", "concessions", "meeting", "pricing", "dining", "amenities", "av", "location", "gallery", "pdf", "next_steps"]
+CTA_ORDER = ["schedule_site_visit", "request_revision", "download_pdf"]
 
 # ---------------- colour / contrast (WCAG 2.1) ----------------
 def _lum(h):
@@ -114,7 +129,22 @@ def _hero_media_url(h):
     return ""
 
 
-def build(h):
+def build(h, plan=None):
+    """(template, contrast checks, palette). With a section plan only the planned sections are rendered, in plan order."""
+    tpl, checks, P, _ = build_full(h, plan)
+    return tpl, checks, P
+
+
+def build_full(h, plan=None):
+    """Like build(), plus the list of hotel-field -> template-slot bindings that were applied (for the mapping report)."""
+    keys = [s["key"] for s in plan["sections"]] if plan else list(DEFAULT_ORDER)
+    flags = (plan or {}).get("flags") or {}
+    want = lambda k: k in keys
+    cta_ids = flags.get("cta_buttons") or CTA_ORDER
+    video_slot, featured, gal_images = flags.get("tour_video_slot", True), flags.get("featured_video", True), flags.get("gallery_images", True)
+    BIND = []
+    def bind(section, slot, key, detail=None, required=True):
+        BIND.append({"section": section, "slot": slot, "config_key": key, "detail": detail, "required": required})
     random.seed(h["slug"])
     P = palette(h["brand"])
     F = h.get("fonts") or {}
@@ -234,10 +264,18 @@ def build(h):
         return [{"id": rid("OneColumn"), "type": "OneColumn", "name": "New OneColumn", "spacingTop": 1, "spacingBottom": 1,
                  "data": {"components": [{"id": "onecol_Video_645", "type": "Video", "data": copy.deepcopy(fv["hippo"])}]}}]
 
+    NEXT_BTN = {"schedule_site_visit": lambda: button("Schedule Site Visit", link="${User.Calendar Link}"),
+                "request_revision": lambda: button("Request Proposal Revision", link="${User.Email}", btype="email"),
+                "download_pdf": lambda: button("Download Proposal PDF")}
+    HDR_BTN = {"schedule_site_visit": lambda: button("<b>Schedule Site Visit</b>", link="${User.Calendar Link}"),
+               "request_revision": lambda: button("<b>Request Proposal Revision</b>", link="${User.Email}", btype="email"),
+               "download_pdf": lambda: button("<b>Download Proposal PDF</b>")}
+
     S = []
-    def section(name, comps, bg=None):
+    def section(key, name, comps, bg=None):
         plain = html_lib.unescape(name)
-        sid = SECTION_IDS.get(plain) or rid("section")
+        sid = SECTION_ID_BY_KEY[key]
+        if key == "dining": rid("section")          # keeps every later id identical to the output before section plans existed
         s = {"id": sid, "name": plain, "order": len(S) + 1, "components": comps, "comments_count": 0}
         if bg: s["backgroundColor"] = bg
         S.append(s)
@@ -261,6 +299,8 @@ def build(h):
         {"id": "vcc_left_CtaButton_492", "type": "CtaButton", "data": {"buttons": [
             button("<b>Download Proposal PDF</b>", color=P["accent_btn"], text_color=P["accent_btn_text"], size="16", chat=4, padding="12px 24px")] }},
     ]
+    if "download_pdf" not in cta_ids: left = [c for c in left if c["type"] != "CtaButton"]
+    bind("overview", "hero text", "overview"); bind("overview", "location tag", "location_tag"); bind("overview", "hero image", "media", hero_src)
     hero = {"id": "HeroVideo_FUwfCAZf", "type": "HeroVideo", "name": "New HeroVideo", "spacingTop": 1, "spacingBottom": 1, "data": {
         "leftComponents": left,
         "rightComponents": [{"id": "hero_video_right_fixed", "type": "Video", "data": {
@@ -272,7 +312,7 @@ def build(h):
         "merge_field": None, "is_document": None, "id": 26447145, "name": "${Event Name} - Danielle", "title": "${Event Name} - Danielle",
         "upload_type": "videoLibrary", "thumbnail_url": hero_src,
         "backgroundColor": D, "is_video_template": False, "vccLeftComponents": copy.deepcopy(left), "dynamic_media_title": None}}
-    section("Overview", [hero, cards([
+    section("overview", "Overview", [hero, cards([
         card("primary", "Group Room Rate", mf("${Guest Room Rate}")),
         card("primary", "Meeting Space", mf("${Meeting Room Rental Total}")),
         card("primary", "Food &amp; Beverage", mf("${Total F&B}")),
@@ -288,9 +328,11 @@ def build(h):
     ], cid="TextCard_tvBfnTXv")], bg=D)
 
     # ===== 3 Why this hotel fits =====
-    section("Why This Hotel Fits", [heading("Why This Hotel Fits", f'Why {h["name"]} works for your event.'),
-                                    cards([icon_card(f["icon"], f["title"], f["body"]) for f in h["fits"]]),
-                                    slot_carousel("fits", "Hotel Fits")])
+    if want("fits"):
+        bind("fits", "icon cards", "fits"); bind("fits", "intro", "name"); bind("fits", "photo carousel", "slots.fits")
+        section("fits", "Why This Hotel Fits", [heading("Why This Hotel Fits", f'Why {h["name"]} works for your event.'),
+                                                cards([icon_card(f["icon"], f["title"], f["body"]) for f in h["fits"]]),
+                                                slot_carousel("fits", "Hotel Fits")])
     def static_table(title, t):
         th = "".join(f'<th style="padding: 8px; text-align: left; font-family: {FB}; color: {INK};">{c}</th>' for c in t["columns"])
         tr = "".join("<tr>" + "".join(f'<td style="padding: 8px; border-top: 1px solid #e3e0d8; font-family: {FB}; color: {INK};">{c}</td>' for c in r) + "</tr>" for r in t["rows"])
@@ -301,74 +343,82 @@ def build(h):
     rt = h.get("room_types") or {}
 
     # ===== 4 Guest rooms =====
-    section("Guest Rooms", [heading("Guest Rooms", h["rooms_intro"]), cards([
-        card("light", "Group Rate", mf("${Guest Room Rate}"), "Breakfast included: " + mf("${Rates Include Breakfast}")),
-        card("light", "Peak Rooms", mf("${Peak Rooms}"), "Total room nights: " + mf("${Total Room Nights}")),
-        card("light", "Sleeping Room Cost", mf("${Total Sleeping Room Cost}"), "Tax included: " + mf("${Rates Include Tax}")),
-        card("light", "Availability", mf("${Availability Status}"), "Needs met: " + mf("${Sleeping Room Needs Met}"))]),
-        table_mf("${Table-Sleeping Room}"), small(mf("${Sleeping Room Info}"))] + ([text(static_table("Room types", rt))] if rt.get("rows") else []) + [slot_carousel("rooms", "Guest Room")])
+    if want("rooms"):
+        bind("rooms", "intro", "rooms_intro", required=False); bind("rooms", "room table", "room_types", required=False); bind("rooms", "photo carousel", "slots.rooms")
+        section("rooms", "Guest Rooms", [heading("Guest Rooms", h.get("rooms_intro")), cards([
+            card("light", "Group Rate", mf("${Guest Room Rate}"), "Breakfast included: " + mf("${Rates Include Breakfast}")),
+            card("light", "Peak Rooms", mf("${Peak Rooms}"), "Total room nights: " + mf("${Total Room Nights}")),
+            card("light", "Sleeping Room Cost", mf("${Total Sleeping Room Cost}"), "Tax included: " + mf("${Rates Include Tax}")),
+            card("light", "Availability", mf("${Availability Status}"), "Needs met: " + mf("${Sleeping Room Needs Met}"))]),
+            table_mf("${Table-Sleeping Room}"), small(mf("${Sleeping Room Info}"))] + ([text(static_table("Room types", rt))] if rt.get("rows") else []) + [slot_carousel("rooms", "Guest Room")])
     # ===== 5 Pricing =====
-    section("Pricing Summary", [heading("Pricing Summary", "Line-item visibility, transparent fees and a single estimate. All amounts in " + mf("${Currency}") + "."),
-        table_mf("${Table-Pricing Details}"), cards([
-            card("light", "Taxes", "", mf("${Applicable Taxes}")), card("light", "Additional Fees", "", mf("${Additional Fees}")),
-            card("light", "Commission", mf("${Commission}")), card("dark", "Total Estimated Cost", mf("${Total Estimated Cost}"))])])
+    if want("pricing"):
+        section("pricing", "Pricing Summary", [heading("Pricing Summary", "Line-item visibility, transparent fees and a single estimate. All amounts in " + mf("${Currency}") + "."),
+            table_mf("${Table-Pricing Details}"), cards([
+                card("light", "Taxes", "", mf("${Applicable Taxes}")), card("light", "Additional Fees", "", mf("${Additional Fees}")),
+                card("light", "Commission", mf("${Commission}")), card("dark", "Total Estimated Cost", mf("${Total Estimated Cost}"))])])
     # ===== 6 Concessions =====
-    section("Concessions &amp; Value Adds", [heading("Concessions &amp; Value Adds", "Every concession offered for this event, shown for internal approval and comparison."),
-        text(f'<p><span style="font-size: 16px; color: black;">{mf("${Concessions}")}</span></p>'),
-        cards([card("primary", "Total Concessions Value", mf("${Total Concessions Value}"), value_size="2rem")])])
+    if want("concessions"):
+        section("concessions", "Concessions &amp; Value Adds", [heading("Concessions &amp; Value Adds", "Every concession offered for this event, shown for internal approval and comparison."),
+            text(f'<p><span style="font-size: 16px; color: black;">{mf("${Concessions}")}</span></p>'),
+            cards([card("primary", "Total Concessions Value", mf("${Total Concessions Value}"), value_size="2rem")])])
     # ===== 7 Meeting space =====
-    v = h["venues"]
+    v = h.get("venues") or {}
     venue_html = static_table("Venue capacities", v) if v.get("rows") else ""
-    section("Meeting Space", [heading("Meeting Space", h["meeting_intro"]), cards([
-        card("light", "Proposed Room", mf("${Meeting Room Name}"), "Setup: " + mf("${Meeting Room Setup}")),
-        card("light", "Capacity", mf("${Meeting Room Capacity}"), "Starts " + mf("${Meeting Start Date}")),
-        card("light", "Room Rental", mf("${Meeting Room Rental}"), "Total " + mf("${Meeting Room Rental Total}"))]),
-        table_mf("${Table-Meeting Agenda}"), small(mf("${Meeting Room Info}"))] + ([text(venue_html)] if v.get("rows") else []) + [slot_carousel("meeting", "Meeting Space")])
+    if want("meeting"):
+        bind("meeting", "intro", "meeting_intro", required=False); bind("meeting", "venue table", "venues", required=False); bind("meeting", "photo carousel", "slots.meeting")
+        section("meeting", "Meeting Space", [heading("Meeting Space", h.get("meeting_intro")), cards([
+            card("light", "Proposed Room", mf("${Meeting Room Name}"), "Setup: " + mf("${Meeting Room Setup}")),
+            card("light", "Capacity", mf("${Meeting Room Capacity}"), "Starts " + mf("${Meeting Start Date}")),
+            card("light", "Room Rental", mf("${Meeting Room Rental}"), "Total " + mf("${Meeting Room Rental Total}"))]),
+            table_mf("${Table-Meeting Agenda}"), small(mf("${Meeting Room Info}"))] + ([text(venue_html)] if v.get("rows") else []) + [slot_carousel("meeting", "Meeting Space")])
     # ===== 8 Dining =====
     dt = h.get("dining_title", "Food &amp; Beverage")
-    S_before = len(S)
-    section(dt, [heading(dt, h["dining_intro"]), cards([
-        card("light", "Avg Breakfast", mf("${Avg Breakfast Cost}")), card("light", "Avg Lunch", mf("${Avg Lunch Cost}")),
-        card("light", "Avg Dinner", mf("${Avg Dinner Cost}")), card("light", "Avg Break", mf("${Avg Break Cost}")),
-        card("light", "F&amp;B Minimum", mf("${F&B Minimum}"), "Service charge " + mf("${Service Charge}") + " · Tax " + mf("${F&B Applicable Tax}"))]),
-        slot_carousel("dining", "Dining")])
-    S[S_before]["id"] = SECTION_IDS["Dining"]
+    if want("dining"):
+        bind("dining", "intro", "dining_intro", required=False); bind("dining", "photo carousel", "slots.dining")
+        section("dining", dt, [heading(dt, h.get("dining_intro")), cards([
+            card("light", "Avg Breakfast", mf("${Avg Breakfast Cost}")), card("light", "Avg Lunch", mf("${Avg Lunch Cost}")),
+            card("light", "Avg Dinner", mf("${Avg Dinner Cost}")), card("light", "Avg Break", mf("${Avg Break Cost}")),
+            card("light", "F&amp;B Minimum", mf("${F&B Minimum}"), "Service charge " + mf("${Service Charge}") + " · Tax " + mf("${F&B Applicable Tax}"))]),
+            slot_carousel("dining", "Dining")])
     # ===== 9 AV =====
-    section("AV &amp; Technology", [heading("AV &amp; Technology", "Technology readiness for meetings, presentations and hybrid events."), cards([
-        icon_card("computer", "AV Estimate", mf("${AV Cost}")), icon_card("wifi", "Meeting Room Internet", mf("${Meeting Room Internet}")),
-        icon_card("video", "Your AV Requirements", mf("${AV Requirements}")), icon_card("music", "Onsite Support", h["av_support"])])])
+    if want("av"):
+        bind("av", "onsite support", "av_support", required=False)
+        section("av", "AV &amp; Technology", [heading("AV &amp; Technology", "Technology readiness for meetings, presentations and hybrid events."), cards([
+            icon_card("computer", "AV Estimate", mf("${AV Cost}")), icon_card("wifi", "Meeting Room Internet", mf("${Meeting Room Internet}")),
+            icon_card("video", "Your AV Requirements", mf("${AV Requirements}"))] + ([icon_card("music", "Onsite Support", h["av_support"])] if h.get("av_support") else []))])
     # ===== 10 Location + map =====
-    section("Location &amp; Destination", [heading("Location &amp; Destination", h["location_intro"]),
-        cards([icon_card(c["icon"], c["title"], c["body"]) for c in h["location_cards"]]), map_embed()])
+    if want("location"):
+        bind("location", "intro", "location_intro"); bind("location", "cards", "location_cards"); bind("location", "map", "map")
+        section("location", "Location &amp; Destination", [heading("Location &amp; Destination", h.get("location_intro")),
+            cards([icon_card(c["icon"], c["title"], c["body"]) for c in h["location_cards"]]), map_embed()])
     # ===== 11 Amenities & fees =====
-    section("Amenities &amp; Fees", [heading("Amenities &amp; Fees", h["amenities_line"]), cards([
-        card("light", "Self Parking", mf("${Self Parking Fee}")), card("light", "Valet Parking", mf("${Valet Parking Fee}")),
-        card("light", "Resort Fee", mf("${Resort Fee}")), card("light", "Guest Room Internet", mf("${Guest Room Internet}")),
-        card("light", "Housekeeping", mf("${Housekeeping}")),
-        card("light", "Last Renovated", mf("${Last Renovated}"), "Construction plans: " + mf("${Construction Plans}"))]),
-        slot_carousel("amenities", "Amenities")])
+    if want("amenities"):
+        bind("amenities", "intro", "amenities_line", required=False); bind("amenities", "photo carousel", "slots.amenities")
+        section("amenities", "Amenities &amp; Fees", [heading("Amenities &amp; Fees", h.get("amenities_line")), cards([
+            card("light", "Self Parking", mf("${Self Parking Fee}")), card("light", "Valet Parking", mf("${Valet Parking Fee}")),
+            card("light", "Resort Fee", mf("${Resort Fee}")), card("light", "Guest Room Internet", mf("${Guest Room Internet}")),
+            card("light", "Housekeeping", mf("${Housekeeping}")),
+            card("light", "Last Renovated", mf("${Last Renovated}"), "Construction plans: " + mf("${Construction Plans}"))]),
+            slot_carousel("amenities", "Amenities")])
     # ===== 12 Virtual tour & gallery =====
-    gal = [dyn_named("Virtual Tour Video", "video", "virtual_tour_video")] + \
-          [image_asset(k, f"Property Image {i}") for i, k in enumerate(h["slots"]["gallery"], 1)]
-    section("Virtual Tour &amp; Gallery", [heading("Virtual Tour &amp; Gallery", "A walkthrough of the venue and property.")]
-            + featured_video() + [carousel(gal, cid="Carousel_GcPXYVuF")])
+    if want("gallery"):
+        gal = ([dyn_named("Virtual Tour Video", "video", "virtual_tour_video")] if video_slot else []) + \
+              ([image_asset(k, f"Property Image {i}") for i, k in enumerate(h["slots"]["gallery"], 1)] if gal_images else [])
+        bind("gallery", "photo carousel", "slots.gallery"); bind("gallery", "featured video", "featured_video", required=False)
+        section("gallery", "Virtual Tour &amp; Gallery", [heading("Virtual Tour &amp; Gallery", "A walkthrough of the venue and property.")]
+                + (featured_video() if featured else []) + [carousel(gal, cid="Carousel_GcPXYVuF")])
     # ===== 13 Proposal PDF =====
-    section("Proposal PDF", [heading("Proposal PDF", "Download the complete proposal and attachments for your approval process."),
-        carousel([dyn_named("RFP Response PDF", "document", "rfp_response_pdf")], cid="Carousel_nWNYZMoW"), small(mf("${Proposal Additional Info}"))])
+    if want("pdf"):
+        section("pdf", "Proposal PDF", [heading("Proposal PDF", "Download the complete proposal and attachments for your approval process."),
+            carousel([dyn_named("RFP Response PDF", "document", "rfp_response_pdf")], cid="Carousel_nWNYZMoW"), small(mf("${Proposal Additional Info}"))])
     # ===== 14 Next steps =====
-    section("Next Steps", [text(f'<p><strong><span style="font-size: 24px; color: {P["heading"]};">Next Steps</span></strong></p>'),
-        {"id": "CtaButton_HmKHURLb", "type": "CtaButton", "name": "New CtaButton", "spacingTop": 1, "spacingBottom": 1,
-         "data": {"buttons": [button("Schedule Site Visit", link="${User.Calendar Link}"), button("Request Proposal Revision", link="${User.Email}", btype="email"),
-                              button("Download Proposal PDF")]}}])
+    if want("next_steps"):
+        section("next_steps", "Next Steps", [text(f'<p><strong><span style="font-size: 24px; color: {P["heading"]};">Next Steps</span></strong></p>'),
+            {"id": "CtaButton_HmKHURLb", "type": "CtaButton", "name": "New CtaButton", "spacingTop": 1, "spacingBottom": 1,
+             "data": {"buttons": [NEXT_BTN[c]() for c in cta_ids]}}])
 
-    pdf_section_order = [
-        SECTION_IDS["Overview"], SECTION_IDS["Why This Hotel Fits"], SECTION_IDS["Guest Rooms"],
-        SECTION_IDS["Concessions & Value Adds"], SECTION_IDS["Meeting Space"], SECTION_IDS["Pricing Summary"],
-        SECTION_IDS["Dining"], SECTION_IDS["Amenities & Fees"], SECTION_IDS["AV & Technology"],
-        SECTION_IDS["Location & Destination"], SECTION_IDS["Virtual Tour & Gallery"],
-        SECTION_IDS["Proposal PDF"], SECTION_IDS["Next Steps"],
-    ]
-    order = {section_id: index for index, section_id in enumerate(pdf_section_order)}
+    order = {SECTION_ID_BY_KEY[k]: index for index, k in enumerate(keys)}
     S.sort(key=lambda item: order.get(item["id"], len(order)))
     for index, item in enumerate(S, 1):
         item["order"] = index
@@ -386,9 +436,7 @@ def build(h):
         "multiple_logo_top": logos,
         "sections": S,
         "sideNav": [{"id": "group_1", "name": "Overview", "order": 1, "sections": [s["id"] for s in S], "isCollapsed": False}],
-        "header_cta_buttons": [button("<b>Schedule Site Visit</b>", link="${User.Calendar Link}"),
-                               button("<b>Request Proposal Revision</b>", link="${User.Email}", btype="email"),
-                               button("<b>Download Proposal PDF</b>")],
+        "header_cta_buttons": [HDR_BTN[c]() for c in cta_ids],
         "settings": {"theme": "light", "primaryColor": P["chrome"], "secondaryColor": P["card_light"], "hideSidebar": False,
                      "cardView": True, "navMode": "sidebar", "menuColor": P["dark"]},
         "contactInfo": {
@@ -400,7 +448,9 @@ def build(h):
             "backgroundColor": P["tint"], "name": "${User.First Name}", "role": "${User.Title}",
             "email": "${User.Email}", "phone": "${User.Phone Number}", "heading": "YOUR CONTACT"},
     }
-    return tpl, CHECKS, P
+    bind("chrome", "header logos", "logos"); bind("chrome", "contact block", "name"); bind("chrome", "contact block address", "address")
+    bind("chrome", "colours", "brand"); bind("chrome", "fonts", "fonts")
+    return tpl, CHECKS, P, BIND
 
 
 FOREIGN = ["Palm Springs", "Kotagiri", "Nilgiris", "Ooty", "Tamil Nadu", "Elmore", "Southlake", "Holiday Inn", "Bengaluru", "Racecourse",

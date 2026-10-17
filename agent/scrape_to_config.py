@@ -234,13 +234,18 @@ def slug_is_hotel(path):
     return bool(re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)+", last)) and not re.fullmatch(r"[a-z]{2}-[a-z]{2,4}", last) and not SECTION_WORDS & set(last.split("-"))
 
 
+def hotel_base_path(path):
+    """The path prefix that belongs to one hotel (its overview page and sub-pages)."""
+    m = re.search(r"(.*/(?:hotels?|resorts?|properties)/[^/]+)", path)
+    return m.group(1) if m else path.rstrip("/") if slug_is_hotel(path) else path.rsplit("/", 1)[0]
+
+
 def convert(sc):
     review, warnings = [], []
     url = sc.get("url", "")
     # ---- hotel base path: only the hotel's own pages are trusted (chain-wide pages describe other hotels) ----
     path = urllib.parse.urlparse(url).path
-    m = re.search(r"(.*/(?:hotels?|resorts?|properties)/[^/]+)", path)
-    base = m.group(1) if m else path.rstrip("/") if slug_is_hotel(path) else path.rsplit("/", 1)[0]
+    base = hotel_base_path(path)
     own = [p for p in sc.get("subpages", []) if urllib.parse.urlparse(p["url"]).path.startswith(base)]
     own.sort(key=lambda p: urllib.parse.urlparse(p["url"]).path.rstrip("/") != base.rstrip("/"))   # hotel overview page first
     foreign = [p["url"] for p in sc.get("subpages", []) if p not in own]
