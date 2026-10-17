@@ -160,7 +160,7 @@ def build_profile(*, hotel, inp, h, cfg, facts, cp, ov, custom, scrape, plan_bra
     ts = now_iso()
     facts_by = {}
     for f in facts or []: facts_by.setdefault(f["field"], f)
-    copy_fields, fallbacks = (cp or {}).get("fields", {}), set((cp or {}).get("fallbacks", []))
+    copy_fields, left_out = (cp or {}).get("fields", {}), set((cp or {}).get("left_out", []))
     ai = set((cp or {}).get("ai_polished", []))
     ld = S2C.hotel_ld((scrape.get("jsonld", []) if scrape else []) +
                       [j for p in (scrape or {}).get("subpages", []) if p["url"] in (cfg.get("sources") or []) for j in p.get("jsonld", [])])
@@ -236,7 +236,7 @@ def build_profile(*, hotel, inp, h, cfg, facts, cp, ov, custom, scrape, plan_bra
                                 else "officially_verified" if all(x["verification_status"] == "officially_verified" for x in items) else "extracted")
     amen_src = (h.get("amenities_line") or "")
     amenities = []
-    if amen_src and "amenities_line" not in fallbacks:
+    if amen_src and "amenities_line" not in left_out:
         manual = "amenities_line" in ov
         for i, a in enumerate(x.strip() for x in re.split(r"\s·\s|,", U(amen_src)) if x.strip()):
             amenities.append({"amenity_id": f"amenity_{i + 1}", "name": a, "category": None, "description": None, "source_url": None,
