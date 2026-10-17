@@ -15,6 +15,7 @@ import json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import netsafe                                    # noqa: E402
+import assets as AS                               # noqa: E402
 from common import jread, jwrite                  # noqa: E402
 
 EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
@@ -69,10 +70,11 @@ def download(job_dir, out_dir):
     rows = used_photos(h, tpl)
     if not rows: sys.exit("This job has no photos to export.")
     os.makedirs(out_dir, exist_ok=True)
+    referer = (jread(f"{job_dir}/scrape.json") or {}).get("url") or (jread(f"{job_dir}/input.json") or {}).get("hotel_url")
     done, failed = [], []
     for key, url, fields in rows:
         try:
-            status, _, body = netsafe.fetch(url, max_bytes=MAX_PHOTO, timeout=20)
+            status, _, body = netsafe.fetch(url, max_bytes=MAX_PHOTO, timeout=20, headers=AS.request_headers(referer))
             ctype, w, hgt = netsafe.image_size(body)
             if status != 200 or ctype not in EXT: failed.append({"key": key, "source_url": url, "reason": f"HTTP {status}, not a usable image"}); continue
             name = key + EXT[ctype]

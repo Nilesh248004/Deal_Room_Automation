@@ -352,6 +352,16 @@ finally:
 mf = json.load(open(os.path.join(outd, "p", "manifest.json")))
 ok(rc == 0 and sorted(os.listdir(os.path.join(outd, "p"))) == ["a_1.png", "a_3.png", "manifest.json"] and [x["key"] for x in mf["failed"]] == ["a_2"], "photos are saved under their key; one that cannot be fetched is listed, not fatal")
 ok(mf["photos"][0]["merge_fields"] == ["Hotel Fits Image 1"] and mf["photos"][0]["caption"] == "Exterior at dusk", "the manifest says which Hippo slot and caption each file belongs to")
+seen_hdr = []
+_orig_fetch = N.fetch
+N.fetch = lambda url, **kw: (seen_hdr.append(kw.get("headers")), _orig_fetch(url, **kw))[1]
+os.environ.update(ALLOW_HTTP="1", ALLOW_PRIVATE_HOSTS="1")
+try:
+    PH.download(outd, os.path.join(outd, "p2")); AS.check_one(BASE + "/ok.png", "https://hotel.example/page")
+finally:
+    N.fetch = _orig_fetch
+    for k, v in _env.items(): os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+ok(len(seen_hdr) >= 4 and all(h_ and h_["Accept"] == AS.request_headers()["Accept"] and "avif" not in h_["Accept"] for h_ in seen_hdr), "the photo export and the asset check send the same Accept header, and neither asks for avif")
 hh_up = copy.deepcopy(H); k0 = hh_up["slots"]["gallery"][0]; src0 = hh_up["media"][k0]["source_url"]
 hh_up["media"][k0]["hippo"] = {"asset_id": 77, "token": "tokZ", "title": k0}
 tpl_up = B.build_full(hh_up, pl0)[0]

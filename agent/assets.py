@@ -22,13 +22,19 @@ def policy():
     return p if p in ("enforce", "warn", "off") else "enforce"
 
 
+def request_headers(referer=None):
+    """What every photo request carries, in the check and in the export, so the file a person uploads is the one that was verified.
+    No avif: its size can't be read here and Hippo's uploader wants jpeg, png, webp or gif."""
+    return {"Accept": "image/webp,image/jpeg,image/png,image/gif,image/*;q=0.8", **({"Referer": referer} if referer else {})}
+
+
 def check_one(url, referer):
     """One validated record for url. Transient network failures are retried; permanent ones are recorded."""
     rec = {"url": url, "ok": False, "status": None, "content_type": None, "bytes": 0, "width": 0, "height": 0, "sha256": None,
            "error": None, "transient": False, "checked_at": now_iso()}
     for attempt in range(RETRIES + 1):
         try:
-            st, hd, body = netsafe.fetch(url, max_bytes=MAX_BYTES, timeout=15, headers={"Accept": "image/avif,image/webp,image/*,*/*;q=0.8", **({"Referer": referer} if referer else {})})
+            st, hd, body = netsafe.fetch(url, max_bytes=MAX_BYTES, timeout=15, headers=request_headers(referer))
         except netsafe.Unsafe as e:
             rec["error"], rec["transient"] = (str(e) if str(e).startswith("host not found") else f"blocked: {e}"), False; return rec
         except netsafe.Transient as e:
