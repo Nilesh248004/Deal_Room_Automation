@@ -356,6 +356,17 @@ hh_up = copy.deepcopy(H); k0 = hh_up["slots"]["gallery"][0]; src0 = hh_up["media
 hh_up["media"][k0]["hippo"] = {"asset_id": 77, "token": "tokZ", "title": k0}
 tpl_up = B.build_full(hh_up, pl0)[0]
 ok("video/thumbnail/tokZ" in json.dumps(tpl_up) and src0 not in json.dumps(tpl_up), "a photo uploaded to Hippo is used everywhere, including the hero, from Hippo's copy: the hotel site's original is not left behind unchecked")
+
+# --- thumbnails are not photos (the Hilton hero came back 150x100 and four others 100x100, all "verified") ---
+mk = lambda w, h_, okv=True: {"ok": okv, "width": w, "height": h_, "sha256": f"s{w}{h_}", "transient": False}
+recs_s = {"https://x/hero-150.jpg": mk(150, 100), "https://x/room-768.jpg": mk(768, 430), "https://x/logo.png": mk(150, 50), "https://x/unknown.avif": mk(0, 0), "https://x/edge-399.jpg": mk(399, 300), "https://x/edge-400.jpg": mk(400, 300)}
+AS.mark_small(recs_s, ["https://x/hero-150.jpg", "https://x/room-768.jpg", "https://x/unknown.avif", "https://x/edge-399.jpg", "https://x/edge-400.jpg"])
+ok(not recs_s["https://x/hero-150.jpg"]["ok"] and "too small" in recs_s["https://x/hero-150.jpg"]["error"] and not recs_s["https://x/hero-150.jpg"]["transient"], "a photo narrower than the minimum is unusable, with a plain reason, and not worth retrying")
+ok(recs_s["https://x/room-768.jpg"]["ok"] and recs_s["https://x/unknown.avif"]["ok"] and recs_s["https://x/edge-400.jpg"]["ok"] and not recs_s["https://x/edge-399.jpg"]["ok"], "a normal photo, one whose size can't be read, and exactly the minimum pass; one pixel under does not")
+ok(recs_s["https://x/logo.png"]["ok"], "a logo is allowed to be small (only photo URLs are checked)")
+hh_s = {"media": {"a_1": {"source_url": "https://x/hero-150.jpg"}, "a_2": {"source_url": "https://x/room-768.jpg"}}, "slots": {"fits": ["a_1"], "rooms": ["a_2"], "gallery": ["a_1", "a_2"]}}
+h2_s, notes_s = AS.prune_media(hh_s, recs_s, "enforce", chg_s := [])
+ok("a_1" not in h2_s["media"] and h2_s["slots"]["fits"] == ["a_2"] and any(c["kind"] == "removed" and "too small" in c["note"] for c in chg_s), "a thumbnail is dropped and its slot refilled with a verified photo, and the swap is recorded for review")
 tx = copy.deepcopy(tpl); tx["sections"][1]["components"][0]["data"]["text"] += "<p>" + "1," * 60000 + " USD</p>"
 t0 = _t.time(); QA.run(tpl=tx, assets=imgs, **qa_in)
 ok(_t.time() - t0 < 3, "pathological hotel text cannot stall the QA regexes")

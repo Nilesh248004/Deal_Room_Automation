@@ -76,6 +76,16 @@ def save_cache(path, cache, records):
     jwrite(path, dict(sorted(keep.items(), key=lambda kv: -kv[1]["_ts"])[:500]))
 
 
+def mark_small(recs, photo_urls, min_width=MIN_WIDTH):
+    """Photos narrower than min_width are thumbnails, placeholders or tracking pixels, not something to put in a proposal.
+    Only photo URLs are passed in: a logo is allowed to be small. Applied after the cache is saved, so a size rule change never needs a re-download."""
+    for u in photo_urls:
+        r = recs.get(u)
+        if r and r.get("ok") and 0 < (r.get("width") or 0) < min_width:
+            r.update(ok=False, transient=False, error=f"too small ({r['width']}x{r['height']}px; photos must be at least {min_width}px wide)")
+    return recs
+
+
 def prune_media(h, assets, pol, changes=None):
     """(h2, notes): h with unreachable or duplicate photos removed and emptied slots refilled. Only under 'enforce'.
     `changes`, if given, receives one dict per removal / substitution / duplicate (kind, key, transient, note) for QA."""

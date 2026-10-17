@@ -539,6 +539,7 @@ def stage_assets(d):
     cache = AS.load_cache(cpath)
     recs = AS.check_assets(photo_urls + logo_urls, referer=(sc or {}).get("url"), cache=cache, ttl_hours=float(os.environ.get("ASSET_CACHE_HOURS", "24") or 24))
     AS.save_cache(cpath, cache, recs)
+    AS.mark_small(recs, photo_urls)
     photos = [recs[u] for u in photo_urls]; ok = [r for r in photos if r["ok"]]
     changes = []
     h2, notes = AS.prune_media(h, recs, pol, changes)
