@@ -14,6 +14,7 @@ from common import jread, jwrite, now_iso
 
 MAX_BYTES = 15_000_000
 MIN_WIDTH = 400
+MIN_PHOTO_BYTES = 3000          # a real photo is tens of KB; a few hundred bytes is a placeholder, whatever format it comes in
 RETRIES = 2
 
 
@@ -87,8 +88,11 @@ def mark_small(recs, photo_urls, min_width=MIN_WIDTH):
     Only photo URLs are passed in: a logo is allowed to be small. Applied after the cache is saved, so a size rule change never needs a re-download."""
     for u in photo_urls:
         r = recs.get(u)
-        if r and r.get("ok") and 0 < (r.get("width") or 0) < min_width:
+        if not (r and r.get("ok")): continue
+        if 0 < (r.get("width") or 0) < min_width:
             r.update(ok=False, transient=False, error=f"too small ({r['width']}x{r['height']}px; photos must be at least {min_width}px wide)")
+        elif not r.get("width") and (r.get("bytes") or 0) < MIN_PHOTO_BYTES:          # size unreadable (a format we can't parse): the file size still gives a placeholder away
+            r.update(ok=False, transient=False, error=f"too small ({r.get('bytes') or 0} bytes: a placeholder, not a photo)")
     return recs
 
 

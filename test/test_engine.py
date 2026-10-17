@@ -368,12 +368,16 @@ tpl_up = B.build_full(hh_up, pl0)[0]
 ok("video/thumbnail/tokZ" in json.dumps(tpl_up) and src0 not in json.dumps(tpl_up), "a photo uploaded to Hippo is used everywhere, including the hero, from Hippo's copy: the hotel site's original is not left behind unchecked")
 
 # --- thumbnails are not photos (the Hilton hero came back 150x100 and four others 100x100, all "verified") ---
-mk = lambda w, h_, okv=True: {"ok": okv, "width": w, "height": h_, "sha256": f"s{w}{h_}", "transient": False}
+mk = lambda w, h_, okv=True, nbytes=50000: {"ok": okv, "width": w, "height": h_, "bytes": nbytes, "sha256": f"s{w}{h_}{nbytes}", "transient": False}
 recs_s = {"https://x/hero-150.jpg": mk(150, 100), "https://x/room-768.jpg": mk(768, 430), "https://x/logo.png": mk(150, 50), "https://x/unknown.avif": mk(0, 0), "https://x/edge-399.jpg": mk(399, 300), "https://x/edge-400.jpg": mk(400, 300)}
 AS.mark_small(recs_s, ["https://x/hero-150.jpg", "https://x/room-768.jpg", "https://x/unknown.avif", "https://x/edge-399.jpg", "https://x/edge-400.jpg"])
 ok(not recs_s["https://x/hero-150.jpg"]["ok"] and "too small" in recs_s["https://x/hero-150.jpg"]["error"] and not recs_s["https://x/hero-150.jpg"]["transient"], "a photo narrower than the minimum is unusable, with a plain reason, and not worth retrying")
 ok(recs_s["https://x/room-768.jpg"]["ok"] and recs_s["https://x/unknown.avif"]["ok"] and recs_s["https://x/edge-400.jpg"]["ok"] and not recs_s["https://x/edge-399.jpg"]["ok"], "a normal photo, one whose size can't be read, and exactly the minimum pass; one pixel under does not")
 ok(recs_s["https://x/logo.png"]["ok"], "a logo is allowed to be small (only photo URLs are checked)")
+recs_a = {"https://x/hero.avif": mk(0, 0, nbytes=1505), "https://x/meeting.avif": mk(0, 0, nbytes=357), "https://x/room.avif": mk(0, 0, nbytes=21068)}
+AS.mark_small(recs_a, list(recs_a))
+ok(not recs_a["https://x/hero.avif"]["ok"] and not recs_a["https://x/meeting.avif"]["ok"] and "placeholder" in recs_a["https://x/hero.avif"]["error"], "an image whose size can't be read but is only a few hundred bytes is a placeholder (Hilton's hero came back as a 1,505-byte avif)")
+ok(recs_a["https://x/room.avif"]["ok"], "an unreadable-size image of normal file size is left alone")
 hh_s = {"media": {"a_1": {"source_url": "https://x/hero-150.jpg"}, "a_2": {"source_url": "https://x/room-768.jpg"}}, "slots": {"fits": ["a_1"], "rooms": ["a_2"], "gallery": ["a_1", "a_2"]}}
 h2_s, notes_s = AS.prune_media(hh_s, recs_s, "enforce", chg_s := [])
 ok("a_1" not in h2_s["media"] and h2_s["slots"]["fits"] == ["a_2"] and any(c["kind"] == "removed" and "too small" in c["note"] for c in chg_s), "a thumbnail is dropped and its slot refilled with a verified photo, and the swap is recorded for review")
