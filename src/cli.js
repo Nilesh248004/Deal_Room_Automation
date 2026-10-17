@@ -110,10 +110,11 @@ function summary(j) {
     const input = JSON.parse(fs.readFileSync(path.join(work, "input.json"), "utf8"));
     let file, text;
     if (flags.from) {
+      const downloads = process.env.DOWNLOADS_DIR ? path.resolve(process.env.DOWNLOADS_DIR) : path.join(os.homedir(), "Downloads");     // where your browser saves files
       file = flags.from === "latest"
-        ? (fs.existsSync(path.join(os.homedir(), "Downloads")) ? fs.readdirSync(path.join(os.homedir(), "Downloads")).filter(n => /^hotel-scrape-.*\.json$/i.test(n)).map(n => path.join(os.homedir(), "Downloads", n)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] : null)
+        ? (fs.existsSync(downloads) ? fs.readdirSync(downloads).filter(n => /^hotel-scrape-.*\.json$/i.test(n)).map(n => path.join(downloads, n)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] : null)
         : path.resolve(flags.from.replace(/^~(?=\/|$)/, os.homedir()));
-      if (!file || !fs.existsSync(file)) quit("✖ no scrape file found" + (flags.from === "latest" ? " (looked for hotel-scrape-*.json in ~/Downloads)" : `: ${flags.from}`), 64);
+      if (!file || !fs.existsSync(file)) quit("✖ no scrape file found" + (flags.from === "latest" ? ` (looked for hotel-scrape-*.json in ${downloads})` : `: ${flags.from}`), 64);
       text = fs.readFileSync(file, "utf8");
       let data; try { data = JSON.parse(text); } catch (e) { quit(`✖ ${file} is not valid JSON: ${e.message}`, 64); }
       if (!data || !Array.isArray(data.images) || typeof data.url !== "string") quit("✖ that is not a scrape: it should be the file downloaded by agent/scrape_hotel.js", 64);

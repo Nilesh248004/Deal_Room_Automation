@@ -45,7 +45,7 @@ node src/cli.js scrape --url "https://www.hilton.com/en/hotels/dalpchf-hilton-da
 node src/cli.js scrape --url "<hotel page>" --from "~/Downloads/hotel-scrape-….json"                                  # or name the file
 ```
 
-The file is checked first: it must be a scrape, made on the same site as the URL. The folder is in `.gitignore`; set `HOTEL_SCRAPS_DIR` to keep scrapes somewhere else.
+The file is checked first: it must be a scrape, made on the same site as the URL. The folder is in `.gitignore`; set `HOTEL_SCRAPS_DIR` to keep scrapes somewhere else, and `DOWNLOADS_DIR` if your browser saves downloads somewhere other than `~/Downloads`.
 
 A hotel-specific run, using the same plan the report describes (an event-focused proposal, meeting space first, no tour video):
 

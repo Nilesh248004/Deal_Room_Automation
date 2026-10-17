@@ -874,7 +874,7 @@ test("photos: the deal room's photos are exported by key, and the assets a perso
 
 test("scrape command: the hotel's scrape is saved under hotel_scraps, from a headless capture or from a file made in the browser", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hotel-scraps-")), home = fs.mkdtempSync(path.join(os.tmpdir(), "fake-home-"));
-  const env = { ...process.env, HOTEL_SCRAPS_DIR: dir, HOME: home };
+  const env = { ...process.env, HOTEL_SCRAPS_DIR: dir, DOWNLOADS_DIR: path.join(home, "Downloads") };      // HOME is left alone: Playwright finds its browser through it
   const cli = (...a) => spawnSync(process.execPath, ["src/cli.js", ...a], { cwd: ROOT, env, encoding: "utf8", timeout: 180000 });
 
   const r1 = cli("scrape", "--url", SITE);
