@@ -5,7 +5,7 @@ import copy, http.server, json, os, sys, tempfile, threading
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "agent"))
 for k in ("ALLOW_PRIVATE_HOSTS", "ALLOW_HTTP", "ALLOWED_HOTEL_DOMAINS", "ASSET_CHECK_POLICY", "ASSET_RIGHTS_POLICY"): os.environ.pop(k, None)
-import netsafe as N, assets as AS, customize as CU, hotel_profile as HP, mapping as MP, qa as QA, dealroom_builder as B, scrape_to_config as S2C   # noqa: E402
+import netsafe as N, assets as AS, customize as CU, hotel_profile as HP, mapping as MP, qa as QA, dealroom_builder as B, scrape_to_config as S2C, photos as PH   # noqa: E402
 
 passed = 0
 def ok(cond, name):
@@ -328,6 +328,34 @@ for glued, why in [("Dallas Love Field4 milesAirport shuttleNot available", "wor
     ok(rg["outcome"] == "REVIEW" and any(x["code"] == "TEXT_RUN_TOGETHER" for x in rg["review"]), f"QA asks for a look when {why}")
 tg = copy.deepcopy(tpl); tg["sections"][1]["components"][0]["data"]["text"] += "<p>Free WiFi and a DoubleTree welcome cookie, 24hr desk, from 3pm, Wi-Fi 6.</p>"
 ok(QA.run(tpl=tg, assets=imgs, **qa_in)["outcome"] == "PASS", "ordinary wording (WiFi, 24hr, 3pm) is not mistaken for glued text")
+
+# --- photos: export for upload to Hippo, and adopt what was uploaded ---
+ok(PH.norm("Exterior_1.JPG") == PH.norm("exterior 1") == "exterior1" and PH.norm("exterior_10") != PH.norm("exterior_1"), "photo names match regardless of case, extension and separators, but exterior_10 is not exterior_1")
+harvest = {"images": [{"section": "Why", "title": "exterior_1.jpg", "asset_id": 501, "token": "tokA"}, {"section": "Rooms", "title": "rooms_2", "asset_id": "502", "token": "tokB"},
+                      {"section": "Rooms", "title": "banner copy", "asset_id": 503, "token": "tokC"}, {"section": "x", "title": "rooms_1", "asset_id": "abc", "token": "t"},
+                      {"section": "x", "title": "exterior_1", "asset_id": 999, "token": "dup"}]}
+pt, unm = PH.match_harvest(harvest, ["exterior_1", "rooms_1", "rooms_2", "dining_1"])
+ok(pt == {"exterior_1": {"hippo": {"asset_id": 501, "token": "tokA", "title": "exterior_1.jpg"}}, "rooms_2": {"hippo": {"asset_id": 502, "token": "tokB", "title": "rooms_2"}}}, "uploaded assets are matched to photo keys by file name; the first match wins; a non-numeric id is refused")
+ok(unm == ["banner copy"], "an uploaded image that is not a photo key is reported, not guessed at")
+ok(PH.match_harvest("not a dict", ["a_1"]) == ({}, []) and PH.match_harvest({"images": [None, 3, {"title": "a_1"}]}, ["a_1"]) == ({}, []), "a malformed harvest file matches nothing instead of crashing")
+hp_ = {"media": {"a_1": {"source_url": BASE + "/ok.png", "_alt": "Exterior at dusk"}, "a_2": {"source_url": BASE + "/gone.png"}, "a_3": {"source_url": BASE + "/same.png"}},
+       "slots": {"fits": ["a_1"], "rooms": ["a_2", "a_1"], "gallery": ["a_3"]}}
+tp_ = {"sections": [{"name": "Why", "components": [{"type": "Carousel", "data": {"assets": [{"type": "image", "url": BASE + "/ok.png", "merge_field": "Hotel Fits Image 1"}]}}]}]}
+used = PH.used_photos(hp_, tp_)
+ok([u[0] for u in used] == ["a_1", "a_2", "a_3"] and used[0][2] == ["Hotel Fits Image 1"], "each photo is listed once, in slot order, with the Hippo slot it fills")
+PH._job = lambda d: (hp_, tp_)
+outd = tempfile.mkdtemp()
+_env = {k: os.environ.get(k) for k in ("ALLOW_HTTP", "ALLOW_PRIVATE_HOSTS")}; os.environ.update(ALLOW_HTTP="1", ALLOW_PRIVATE_HOSTS="1")      # the local image host is plain http on loopback
+try: rc = PH.download(outd, os.path.join(outd, "p"))
+finally:
+    for k, v in _env.items(): os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+mf = json.load(open(os.path.join(outd, "p", "manifest.json")))
+ok(rc == 0 and sorted(os.listdir(os.path.join(outd, "p"))) == ["a_1.png", "a_3.png", "manifest.json"] and [x["key"] for x in mf["failed"]] == ["a_2"], "photos are saved under their key; one that cannot be fetched is listed, not fatal")
+ok(mf["photos"][0]["merge_fields"] == ["Hotel Fits Image 1"] and mf["photos"][0]["caption"] == "Exterior at dusk", "the manifest says which Hippo slot and caption each file belongs to")
+hh_up = copy.deepcopy(H); k0 = hh_up["slots"]["gallery"][0]; src0 = hh_up["media"][k0]["source_url"]
+hh_up["media"][k0]["hippo"] = {"asset_id": 77, "token": "tokZ", "title": k0}
+tpl_up = B.build_full(hh_up, pl0)[0]
+ok("video/thumbnail/tokZ" in json.dumps(tpl_up) and src0 not in json.dumps(tpl_up), "a photo uploaded to Hippo is used everywhere, including the hero, from Hippo's copy: the hotel site's original is not left behind unchecked")
 tx = copy.deepcopy(tpl); tx["sections"][1]["components"][0]["data"]["text"] += "<p>" + "1," * 60000 + " USD</p>"
 t0 = _t.time(); QA.run(tpl=tx, assets=imgs, **qa_in)
 ok(_t.time() - t0 < 3, "pathological hotel text cannot stall the QA regexes")

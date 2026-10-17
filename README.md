@@ -149,6 +149,23 @@ Every endpoint except `/health` and `/` needs `x-api-key: <key>` or `Authorizati
 * `robots.txt` is respected (`ROBOTS_POLICY=enforce`). For a site that disallows automation, run the browser scraper yourself and upload the file as `scrape`, or set `ROBOTS_POLICY=warn` if you have permission.
 * A section whose hotel-owned prose has nothing sourced behind it is now left out of the block rather than failing the build (intros are optional).
 
+## Photos in Hippo
+
+A deal room built from a hotel's website shows **no photos in Hippo until they are uploaded there**: each photo slot is a media merge field ("Hotel Fits Image 1") and Hippo has nothing to show for it. Until Hippo gives us an upload API, the flow is:
+
+```bash
+node src/cli.js photos <job id>                     # saves every photo the deal room uses, named by photo key (exterior_1.jpg, rooms_2.png ...), plus manifest.json
+```
+
+1. In the Hippo deal-room editor, upload those files into a carousel and click **Save**. Keep the file names: they are how the photos are matched.
+2. In the same editor tab run `agent/browser_snippets/harvest_media.js`. It downloads `hippo-media-<page>.json`.
+3. ```bash
+   node src/cli.js media <job id> ~/Downloads/hippo-media-<page>.json
+   ```
+   Each uploaded image is matched to its photo by file name and the deal room is rebuilt, checked and held for approval again. Photos you haven't uploaded stay merge fields; the command lists them. An uploaded image whose name isn't a photo key is ignored and reported. Then approve and load as usual.
+
+The hero banner uses the first photo, so upload that one first. The API takes the same overrides: `POST /deal-rooms/:id/overrides` with `{"media": {"exterior_1": {"hippo": {"asset_id": 123, "token": "..."}}}}`.
+
 ## Inspecting the Hippo editor API
 
 To create a machine-readable API/structure report, open a disposable Hippo deal-room **editor** page while logged in and run `agent/browser_snippets/inspect_editor_api.js` in DevTools Console. The inspector reads the editor template and passively observes same-origin `/api/` requests; it does not initiate saves or edits. Test one action at a time and label it before performing it, for example:
@@ -234,7 +251,7 @@ The end-to-end tests cover the following:
 
 1. **Delivery.** PDF export, share-link creation and checks, email/CRM sending and open/view tracking (report §14) need Hippo or CRM APIs that aren't verified. A job's `result.json` says `delivery: not_configured`; nothing is ever reported as sent.
 2. **Rendered-page QA.** Checking the saved page on mobile and desktop needs a Hippo preview URL the agent can open.
-3. **Image and logo upload API.** Photos go in as media merge fields, and the review page shows the scraped photo for each slot. Hippo only shows logos that were uploaded, so upload the hotel logo once on the page; later loads keep it.
+3. **Image and logo upload API.** Until a photo is uploaded to Hippo its slot is a media merge field with nothing behind it, so Hippo shows a placeholder (the review page shows the scraped photo, Hippo doesn't). There is no upload API we can call yet, so uploading is a manual step: see [Photos in Hippo](#photos-in-hippo). Hippo also only shows logos that were uploaded, so upload the hotel logo once on the page; later loads keep it.
 4. **Hippo service token** for `load=api`. A session cookie works but expires.
 5. **Fonts:** confirm that Hippo's deal room renders Google Fonts.
 6. **Venue and room tables:** the Taj/IHCL page layout is supported. Other chains get the facts but not the tables, so the `meeting_space` family isn't available for them.

@@ -8,6 +8,8 @@
 //   node src/cli.js overrides <job id> <file.json>
 //   node src/cli.js retry    <job id>          (resume a failed job from the stage that failed)
 //   node src/cli.js rollback <job id>
+//   node src/cli.js photos   <job id> [--out <folder>]   (save the deal room's photos, named by key, to upload to Hippo)
+//   node src/cli.js media    <job id> <hippo-media.json> (use the photos you uploaded: output of harvest_media.js)
 //   node src/cli.js status   <job id>
 //   node src/cli.js list
 //   node src/cli.js exceptions [--status open|in_review|resolved|unresolved]
@@ -19,7 +21,9 @@
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
-const { Jobs, validateInput, validateCustomization } = require("./jobs");
+const { spawnSync } = require("node:child_process");
+const cfg = require("./config");
+const { Jobs, validateInput, validateCustomization, stageEnv } = require("./jobs");
 
 const USAGE = fs.readFileSync(__filename, "utf8").split("\n").filter(l => l.startsWith("//")).slice(1, 20).map(l => l.slice(3)).join("\n");
 const [cmd, ...rest] = process.argv.slice(2);
@@ -91,6 +95,25 @@ function summary(j) {
     if (j.status === "awaiting_approval" && flags.approve) { console.log("\n▶ approved from the command line (--approve)"); jobs.approve(j.id, who); j = await follow(j.id); }
     process.exit(summary(j));
   }
+  if (["photos", "media"].includes(cmd)) {
+    const id = pos[0] || die(USAGE);
+    if (!jobs.get(id)) die("✖ job not found: " + id, 1);
+    const dir = jobs.jobDir(id), py = f => spawnSync(cfg.python, [path.join(cfg.ROOT, "agent", "photos.py"), ...f], { cwd: cfg.ROOT, env: stageEnv({ HOTELS_DIR: jobs.hotelsDir }, "photos"), shell: false, encoding: "utf8", maxBuffer: 1 << 24 });
+    if (cmd === "photos") {
+      const out = path.resolve(flags.out || path.join(dir, "photos")), r = py(["download", dir, out]);
+      process.stdout.write(r.stdout || ""); process.stderr.write(r.stderr || "");
+      if (r.status === 0) console.log("Next: upload these files into a carousel in the Hippo editor (keep the file names), click Save, run agent/browser_snippets/harvest_media.js in that tab, then\n  node src/cli.js media " + id + " <the downloaded hippo-media-….json>");
+      process.exit(r.status === null ? 1 : r.status);
+    }
+    const file = pos[1] || die(USAGE), r = py(["adopt", dir, path.resolve(file)]);
+    process.stderr.write(r.stderr || "");
+    if (r.status !== 0) process.exit(r.status === null ? 1 : r.status);
+    let patch; try { patch = JSON.parse(r.stdout); } catch { die("✖ could not read the matched photos", 1); }
+    const p = follow(id);
+    try { jobs.overrides(id, patch, who); } catch (e) { die("✖ " + e.message, 1); }
+    process.exit(summary(await p));
+  }
+
   if (["approve", "rollback", "overrides", "retry"].includes(cmd)) {
     const id = pos[0] || die(USAGE);
     if (!jobs.get(id)) die("✖ job not found: " + id, 1);

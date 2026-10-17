@@ -831,3 +831,43 @@ test("a job interrupted with no recorded stage still gets a failure and an excep
   const x = restarted.exceptions.forJob(id);
   assert.equal(x.length, 1); assert.equal(x[0].failed_stage, "runner"); assert.equal(x[0].retry_eligible, false, "nothing to resume from");
 });
+
+test("photos: the deal room's photos are exported by key, and the assets a person uploaded to Hippo are used by file name", async () => {
+  const { id } = await newJob({ load: "manual", force: true });
+  const carousels = tpl => tpl.sections.flatMap(x => x.components).filter(c => c.type === "Carousel").flatMap(c => c.data.assets);
+  const before = carousels(await art(id, "template.json"));
+  assert.ok(before.length > 2 && before.every(a => a.is_dynamic_media), "before upload every photo slot is a media merge field with nothing behind it");
+
+  const out = path.join(DATA, "photos-out"), cli = (...a) => spawnSync(process.execPath, ["src/cli.js", ...a], { cwd: ROOT, env: process.env, encoding: "utf8", timeout: 180000 });
+  const r1 = cli("photos", id, "--out", out);
+  assert.equal(r1.status, 0, r1.stderr + r1.stdout);
+  const mf = JSON.parse(fs.readFileSync(path.join(out, "manifest.json"), "utf8"));
+  assert.ok(mf.photos.length >= 2, "photos were saved");
+  for (const ph of mf.photos) {
+    assert.match(ph.file, /^[a-z]+_\d+\.(jpg|png|webp|gif)$/, "named by photo key");
+    assert.ok(fs.statSync(path.join(out, ph.file)).size > 100, "a real file");
+    assert.ok(ph.merge_fields.length, "the manifest says which Hippo slot it fills");
+  }
+  assert.match(r1.stdout, /harvest_media\.js/, "the next step is spelled out");
+
+  // a person uploaded the first two files in the Hippo editor; harvest_media.js read them back
+  const hf = path.join(DATA, "hippo-media-test.json");
+  fs.writeFileSync(hf, JSON.stringify({ page_id: "777001", videos: [], logos: [], images: [
+    ...mf.photos.slice(0, 2).map((ph, i) => ({ section: "Why", title: ph.file, asset_id: 9100 + i, token: "tok" + i })),
+    { section: "Why", title: "banner copy", asset_id: 5, token: "zzz" }] }));
+  const r2 = cli("media", id, hf);
+  assert.equal(r2.status, 10, "the job rebuilds and waits for approval again: " + r2.stderr + r2.stdout);
+  assert.match(r2.stderr, /matched 2 of \d+ photos/);
+  assert.match(r2.stderr, /ignored 1 uploaded image/);
+  const after = carousels(await art(id, "template.json"));
+  const up = after.filter(a => a.asset_id);
+  assert.deepEqual([...new Set(up.map(a => a.asset_id))].sort(), [9100, 9101], "the two uploaded photos are now real Hippo assets (each may sit in more than one carousel)");
+  assert.ok(up.every(a => !a.is_dynamic_media && a.url.includes("/video/thumbnail/tok")), "pointing at the uploaded image, not a merge field");
+  assert.ok(after.filter(a => !a.asset_id).every(a => a.is_dynamic_media), "photos not uploaded yet are still merge fields");
+  assert.equal((await req("GET", `/deal-rooms/${id}`)).json.status, "awaiting_approval");
+  const bad = path.join(DATA, "hippo-media-bad.json");
+  fs.writeFileSync(bad, JSON.stringify({ images: [{ title: "something_else", asset_id: 1, token: "t" }] }));
+  const r3 = cli("media", id, bad);
+  assert.notEqual(r3.status, 0, "a harvest with no photo-key names changes nothing");
+  assert.match(r3.stderr, /named like a photo key/);
+});

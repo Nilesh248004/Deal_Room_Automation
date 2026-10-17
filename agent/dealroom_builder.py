@@ -121,6 +121,9 @@ def _hero_media_url(h):
         ordered.extend(slots.get(slot, []))
     for key in ordered:
         item = media.get(key)
+        hp = item.get("hippo") or {} if isinstance(item, dict) else {}
+        if hp.get("asset_id") and hp.get("token"):                       # uploaded to Hippo: use Hippo's copy, not the hotel site's unchecked original
+            return f"https://www.hippovideo.io/video/thumbnail/{hp['token']}"
         if isinstance(item, dict) and item.get("source_url"):
             return item["source_url"]
     for item in media.values():
